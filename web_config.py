@@ -31,10 +31,14 @@ app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 app.secret_key = secrets.token_hex(32)
 
 # ---------------------------------------------------------------------------
-# Login credentials — CHANGE THESE for any non-trusted-LAN deployment.
+# Login credentials.
+# Override via environment variables MHS_ADMIN_USER / MHS_ADMIN_PASSWORD
+# for per-instance secrets; the strings below are fallback defaults that
+# work out-of-the-box on a trusted home LAN.
+# CHANGE THESE (or set the env-vars) for any non-trusted-LAN deployment.
 # ---------------------------------------------------------------------------
-ADMIN_USERNAME = "admin"      # Change this for production use.
-ADMIN_PASSWORD = "06112024"   # Change this for production use.
+ADMIN_USERNAME = os.environ.get("MHS_ADMIN_USER", "admin")       # Change for production use.
+ADMIN_PASSWORD = os.environ.get("MHS_ADMIN_PASSWORD", "06112024") # Change for production use.
 # ---------------------------------------------------------------------------
 
 # Optional shared-secret protection: set the MHS_CONFIG_TOKEN environment
@@ -69,11 +73,19 @@ def _is_authenticated():
     return False
 
 
+_STATIC_EXTS = frozenset({".css", ".js", ".png", ".jpg", ".ico", ".svg", ".woff", ".woff2", ".ttf"})
+
+
 @app.before_request
 def require_auth():
-    """Gate every route that is not the login/logout page itself."""
+    """Gate every route that is not the login/logout page or a static asset."""
     public = {"/login", "/logout"}
     if request.path in public:
+        return None
+    # Allow static asset files (CSS, JS, images) through so the login page
+    # itself can load its stylesheet without being redirected.
+    _, ext = os.path.splitext(request.path)
+    if ext.lower() in _STATIC_EXTS:
         return None
     if not _is_authenticated():
         if request.path.startswith("/api/"):

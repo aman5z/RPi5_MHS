@@ -707,19 +707,23 @@ def _apply_orientation(image):
 
     Orientations:
       "normal"  -> 0° (no change)
-      "flipped" -> 180°
-      "left"    -> 90° CCW (image is transposed so the FB still gets W×H)
-      "right"   -> 90° CW
+      "flipped" -> 180° — image is simply rotated; size stays 480×320.
+      "left"    -> 90° CCW — image is rotated without expand so the content
+                   rotates inside the 480×320 canvas (corners are clipped;
+                   a true portrait layout would require separate portrait-
+                   resolution renderers, which is outside the scope here).
+      "right"   -> 90° CW — same note as "left".
     """
     orientation = CONFIG.get("display", {}).get("orientation", "normal")
 
     if orientation == "flipped":
         return image.rotate(180)
     if orientation == "left":
-        # 90° CCW — result size is H×W; transpose back to fit 480×320 FB.
-        return image.rotate(90, expand=True).resize((W, H), Image.LANCZOS)
+        # 90° CCW, keeping the 480×320 canvas (content is rotated in-place).
+        return image.rotate(90, expand=False)
     if orientation == "right":
-        return image.rotate(-90, expand=True).resize((W, H), Image.LANCZOS)
+        # 90° CW, keeping the 480×320 canvas.
+        return image.rotate(-90, expand=False)
     return image
 
 
