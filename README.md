@@ -3,8 +3,8 @@ Custom Display Pages for Raspberry Pi 5 with MHS 3.5" Touchscreen
 
 ## What's included
 
-- `dashboard.py` &mdash; renders the clock/weather and system status screens
-  directly to the framebuffer (`/dev/fb0`).
+- `dashboard.py` &mdash; renders the clock/weather, system status, network
+  info, and CPU stats screens directly to the framebuffer (`/dev/fb0`).
 - `dashboard_config.py` &mdash; shared configuration schema/loader used by both
   the dashboard and the web UI. Settings are persisted to `config.json`
   (created automatically on first save; not committed to the repo).
@@ -32,16 +32,47 @@ same `config.json` the dashboard reads):
 python3 web_config.py
 ```
 
-Then open `http://<pi-ip-address>:8080/` in a browser. From there you can:
+Then open `http://<pi-ip-address>:8080/` in a browser.
 
-- Pick a theme (background/foreground colors), or choose from a few presets
-- Choose a font family (from the fonts installed on the system) and adjust
-  the size of each text element (clock, date, values, labels, etc.)
-- Set text alignment (left/center/right) for the clock and date
-- Enable/disable and reorder the screens shown in the slideshow (drag to
-  reorder)
-- Adjust timing (FPS, how long each screen is shown) and enable/disable
-  and time the slide transition animation
+### Login
+
+The configuration UI is protected by a login page.
+
+| Field    | Default value |
+|----------|---------------|
+| Username | `admin`       |
+| Password | `06112024`    |
+
+> **Security warning**: These are hardcoded defaults intended for a trusted
+> home network only. Before exposing the Pi to the wider internet, change
+> `ADMIN_USERNAME` and `ADMIN_PASSWORD` near the top of `web_config.py`.
+
+### What you can configure
+
+From the web UI you can:
+
+- **Theme** &mdash; background, foreground, and secondary/label colors; six
+  built-in presets (Classic, Green, Amber, Ocean Blue, Sunset, Monochrome).
+- **Display** &mdash; screen orientation (normal / flipped / left / right) and
+  backlight brightness 0–100 (applied via sysfs when a backlight device is
+  available; silently ignored otherwise).
+- **Fonts** &mdash; font family (from fonts installed on the system) and
+  individual sizes for every text element (clock, date, values, labels, etc.).
+- **Alignment** &mdash; left/center/right for the clock, date, value labels,
+  and footer hint lines, independently.
+- **Screens** &mdash; enable/disable and reorder (drag) the four built-in
+  screens:
+  - **Clock & Weather** &mdash; time, date, temperature and humidity.
+  - **System Status** &mdash; CPU load, temperature, RAM, disk, fan speed, IP.
+  - **Network Info** &mdash; hostname, LAN IP, Wi-Fi SSID, system uptime.
+  - **CPU Stats** &mdash; CPU history sparkline, top process, swap usage.
+- **Footer lines** &mdash; each screen has a configurable footer hint shown at
+  the bottom. You can edit the text or hide it entirely per screen.
+- **Timing & Animation** &mdash; FPS, screen duration, transition duration,
+  enable/disable slide transitions, enable/disable icon animations.
+- **Weather & Location** &mdash; `auto` mode (geolocates via ipwho.is, the
+  existing default) or `manual` mode (enter latitude & longitude directly,
+  skipping the IP geolocation call).
 
 Changes are saved to `config.json` and picked up by the running
 `dashboard.py` process automatically (within about a second), no restart
@@ -49,19 +80,15 @@ required.
 
 ### Securing the config server
 
-`web_config.py` listens on all network interfaces with no authentication
-by default, which is fine on a trusted home LAN. If the Pi is reachable
-from a less trusted network, set the `MHS_CONFIG_TOKEN` environment
-variable before starting the server to require a shared secret:
+`web_config.py` already requires a username/password login (see above).
+
+For programmatic/API access you can additionally set the `MHS_CONFIG_TOKEN`
+environment variable; clients then bypass the session login by sending the
+token as `?token=...` or an `X-Config-Token` header:
 
 ```bash
 MHS_CONFIG_TOKEN=some-long-random-value python3 web_config.py
 ```
-
-Clients then need to send it as `?token=...` or an `X-Config-Token`
-header (the bundled `static/config.html` UI is unauthenticated convenience
-tooling for trusted networks; add the token to the URL as
-`http://<pi-ip>:8080/?token=...` if you enable it).
 
 ### Running both as services on boot
 

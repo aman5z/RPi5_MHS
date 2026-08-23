@@ -10,11 +10,13 @@
 <header>
   <h1>RPi5 MHS Dashboard Configuration</h1>
   <p class="subtitle">Changes apply live &mdash; the physical screen picks them up within a second of saving.</p>
+  <a href="/logout" class="logout-link">Logout</a>
 </header>
 
 <main>
   <div id="status" class="status" hidden></div>
 
+  <!-- THEME -->
   <section class="card">
     <h2>Theme</h2>
     <div class="theme-presets" id="theme-presets"></div>
@@ -25,9 +27,34 @@
       <label>Foreground / Text
         <input type="color" id="theme-foreground">
       </label>
+      <label>Secondary / Labels
+        <input type="color" id="theme-text_secondary">
+      </label>
     </div>
   </section>
 
+  <!-- DISPLAY -->
+  <section class="card">
+    <h2>Display</h2>
+    <div class="field-row">
+      <label>Orientation
+        <select id="display-orientation">
+          <option value="normal">Normal (0°)</option>
+          <option value="flipped">Flipped (180°)</option>
+          <option value="left">Rotated Left (90° CCW)</option>
+          <option value="right">Rotated Right (90° CW)</option>
+        </select>
+      </label>
+      <label>Brightness (0–100)
+        <div class="slider-row">
+          <input type="range" min="0" max="100" id="display-brightness" class="slider">
+          <span id="display-brightness-val">100</span>%
+        </div>
+      </label>
+    </div>
+  </section>
+
+  <!-- FONTS -->
   <section class="card">
     <h2>Fonts</h2>
     <div class="field-row">
@@ -46,6 +73,7 @@
     </div>
   </section>
 
+  <!-- ALIGNMENT -->
   <section class="card">
     <h2>Alignment</h2>
     <div class="field-row">
@@ -63,15 +91,31 @@
           <option value="right">Right</option>
         </select>
       </label>
+      <label>Values / Labels
+        <select id="align-values">
+          <option value="left">Left</option>
+          <option value="center">Center</option>
+          <option value="right">Right</option>
+        </select>
+      </label>
+      <label>Footer lines
+        <select id="align-footer">
+          <option value="left">Left</option>
+          <option value="center">Center</option>
+          <option value="right">Right</option>
+        </select>
+      </label>
     </div>
   </section>
 
+  <!-- SCREENS -->
   <section class="card">
     <h2>Screens</h2>
     <p class="hint">Enable/disable and reorder (drag) the screens shown in the slideshow. At least one must stay enabled.</p>
     <ul id="screen-list" class="screen-list"></ul>
   </section>
 
+  <!-- TIMING & ANIMATION -->
   <section class="card">
     <h2>Timing &amp; Animation</h2>
     <div class="field-grid">
@@ -81,6 +125,31 @@
       <label class="checkbox-label">
         <input type="checkbox" id="timing-transitions_enabled">
         Enable slide transitions
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="timing-icon_animations_enabled">
+        Enable icon animations
+      </label>
+    </div>
+  </section>
+
+  <!-- WEATHER -->
+  <section class="card">
+    <h2>Weather &amp; Location</h2>
+    <div class="field-row">
+      <label>Location mode
+        <select id="weather-mode">
+          <option value="auto">Auto (IP geolocation)</option>
+          <option value="manual">Manual (enter coordinates)</option>
+        </select>
+      </label>
+    </div>
+    <div id="weather-manual-fields" class="field-row" style="display:none">
+      <label>Latitude
+        <input type="number" step="any" id="weather-latitude" placeholder="e.g. 51.5074">
+      </label>
+      <label>Longitude
+        <input type="number" step="any" id="weather-longitude" placeholder="e.g. -0.1278">
       </label>
     </div>
   </section>

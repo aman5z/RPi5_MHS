@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MHS Dashboard &mdash; Login</title>
+<link rel="stylesheet" href="config.css">
+<style>
+  .login-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-card {
+    width: 100%;
+    max-width: 360px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px 28px 28px;
+  }
+  .login-card h1 {
+    margin: 0 0 4px;
+    font-size: 1.3rem;
+    text-align: center;
+  }
+  .login-card .subtitle {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .login-card label {
+    flex-direction: column;
+    margin-bottom: 14px;
+  }
+  .login-card button {
+    width: 100%;
+    margin-top: 8px;
+  }
+  #login-error {
+    display: none;
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    background: rgba(255, 90, 90, 0.15);
+    color: #ff9a9a;
+    border: 1px solid rgba(255, 90, 90, 0.4);
+  }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <h1>RPi5 MHS Dashboard</h1>
+    <p class="subtitle">Sign in to configure the display</p>
+
+    <div id="login-error"></div>
+
+    <form id="login-form">
+      <label>
+        Username
+        <input type="text" name="username" id="username" autocomplete="username" required>
+      </label>
+      <label>
+        Password
+        <input type="password" name="password" id="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="primary">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  document.getElementById("login-form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    const form = e.target;
+    const body = new URLSearchParams(new FormData(form)).toString();
+    const errEl = document.getElementById("login-error");
+
+    try {
+      const res = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+
+      if (res.ok || res.redirected) {
+        // Server returned 200 or a redirect — navigate to main config page.
+        window.location.href = "/";
+      } else if (res.status === 401) {
+        errEl.textContent = "Invalid username or password. Please try again.";
+        errEl.style.display = "block";
+      } else {
+        errEl.textContent = "Login failed. Please try again.";
+        errEl.style.display = "block";
+      }
+    } catch (err) {
+      errEl.textContent = "Network error. Please check your connection.";
+      errEl.style.display = "block";
+    }
+  });
+</script>
+</body>
+</html>

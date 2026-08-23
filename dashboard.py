@@ -5,6 +5,7 @@ import glob
 import time
 import math
 import socket
+import subprocess
 import requests
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
@@ -30,14 +31,60 @@ _config_mtime = cfgmod.get_mtime()
 
 WHITE = cfgmod.hex_to_rgb(CONFIG["theme"]["foreground"])
 BLACK = cfgmod.hex_to_rgb(CONFIG["theme"]["background"])
+SECONDARY = cfgmod.hex_to_rgb(CONFIG["theme"]["text_secondary"])
 
 FPS = CONFIG["timing"]["fps"]
 FRAME_INTERVAL = 1.0 / FPS
 SCREEN_DURATION = CONFIG["timing"]["screen_duration"]
 TRANSITION_DURATION = CONFIG["timing"]["transition_duration"]
 TRANSITIONS_ENABLED = CONFIG["timing"]["transitions_enabled"]
+ICON_ANIMATIONS_ENABLED = CONFIG["timing"]["icon_animations_enabled"]
 
 _font_cache = {}
+
+# Backlight sysfs path discovered once and cached.
+_backlight_path = None
+_backlight_checked = False
+
+
+def _find_backlight():
+    """Return the sysfs brightness file path, or None if not available."""
+    global _backlight_path, _backlight_checked
+    if _backlight_checked:
+        return _backlight_path
+    _backlight_checked = True
+    try:
+        for entry in glob.glob("/sys/class/backlight/*/brightness"):
+            _backlight_path = entry
+            break
+    except Exception:
+        pass
+    return _backlight_path
+
+
+def set_brightness(value):
+    """Write brightness (0-100) to the sysfs backlight device.
+
+    Silently no-ops with a printed message if no backlight device is
+    found (e.g. HDMI displays, displays without kernel driver support).
+    """
+    path = _find_backlight()
+    if not path:
+        # No backlight device available on this system — skip silently.
+        return
+    try:
+        max_path = os.path.join(os.path.dirname(path), "max_brightness")
+        max_brightness = 255
+        try:
+            with open(max_path) as f:
+                max_brightness = int(f.read().strip())
+        except Exception:
+            pass
+        raw = int(max_brightness * value / 100)
+        with open(path, "w") as f:
+            f.write(str(raw))
+    except Exception as exc:
+        print(f"Brightness write failed ({path}): {exc}")
 
 
 def get_font(path, size):
@@ -57,34 +104,37 @@ def apply_config(cfg):
     list) from a config dict. Called at startup and whenever
     config.json changes on disk."""
 
-    global CONFIG, WHITE, BLACK, FPS, FRAME_INTERVAL
+    global CONFIG, WHITE, BLACK, SECONDARY, FPS, FRAME_INTERVAL
     global SCREEN_DURATION, TRANSITION_DURATION, TRANSITIONS_ENABLED
+    global ICON_ANIMATIONS_ENABLED
     global clock_font, date_font, value_font, big_value_font
     global small_font, ip_font, title_font
     global SCREEN_RENDERERS, NUM_SCREENS
 
     CONFIG = cfg
 
-    WHITE = cfgmod.hex_to_rgb(cfg["theme"]["foreground"])
-    BLACK = cfgmod.hex_to_rgb(cfg["theme"]["background"])
+    WHITE     = cfgmod.hex_to_rgb(cfg["theme"]["foreground"])
+    BLACK     = cfgmod.hex_to_rgb(cfg["theme"]["background"])
+    SECONDARY = cfgmod.hex_to_rgb(cfg["theme"]["text_secondary"])
 
     timing = cfg["timing"]
-    FPS = timing["fps"]
-    FRAME_INTERVAL = 1.0 / FPS
-    SCREEN_DURATION = timing["screen_duration"]
-    TRANSITION_DURATION = timing["transition_duration"]
-    TRANSITIONS_ENABLED = timing["transitions_enabled"]
+    FPS                       = timing["fps"]
+    FRAME_INTERVAL            = 1.0 / FPS
+    SCREEN_DURATION           = timing["screen_duration"]
+    TRANSITION_DURATION       = timing["transition_duration"]
+    TRANSITIONS_ENABLED       = timing["transitions_enabled"]
+    ICON_ANIMATIONS_ENABLED   = timing["icon_animations_enabled"]
 
     fonts = cfg["fonts"]
     font_regular, font_bold = cfgmod.resolve_font_paths(fonts["family"])
 
-    clock_font = get_font(font_bold, fonts["clock_size"])
-    date_font = get_font(font_bold, fonts["date_size"])
-    value_font = get_font(font_bold, fonts["value_size"])
+    clock_font     = get_font(font_bold, fonts["clock_size"])
+    date_font      = get_font(font_bold, fonts["date_size"])
+    value_font     = get_font(font_bold, fonts["value_size"])
     big_value_font = get_font(font_bold, fonts["big_value_size"])
-    small_font = get_font(font_regular, fonts["small_size"])
-    ip_font = get_font(font_bold, fonts["ip_size"])
-    title_font = get_font(font_bold, fonts["title_size"])
+    small_font     = get_font(font_regular, fonts["small_size"])
+    ip_font        = get_font(font_bold, fonts["ip_size"])
+    title_font     = get_font(font_bold, fonts["title_size"])
 
     enabled_ids = [s["id"] for s in cfg["screens"] if s["enabled"]]
 
@@ -97,6 +147,10 @@ def apply_config(cfg):
         SCREEN_RENDERERS = [draw_screen_clock]
 
     NUM_SCREENS = len(SCREEN_RENDERERS)
+
+    # Apply brightness to backlight if configured and available.
+    brightness = cfg.get("display", {}).get("brightness", 100)
+    set_brightness(brightness)
 
 
 def reload_config_if_changed():
@@ -271,18 +325,23 @@ def update_weather():
         return
 
     try:
+        weather_cfg = CONFIG.get("weather", {})
+        mode = weather_cfg.get("mode", "auto")
 
-        if weather_lat is None:
-
-            r = requests.get(
-                "https://ipwho.is/",
-                timeout=5
-            )
-
-            d = r.json()
-
-            weather_lat = d.get("latitude")
-            weather_lon = d.get("longitude")
+        if mode == "manual":
+            # Use coordinates supplied directly in config; skip IP geolocation.
+            cfg_lat = weather_cfg.get("latitude")
+            cfg_lon = weather_cfg.get("longitude")
+            if cfg_lat is not None and cfg_lon is not None:
+                weather_lat = float(cfg_lat)
+                weather_lon = float(cfg_lon)
+        else:
+            # Auto mode: geolocate via ipwho.is when coords are unknown.
+            if weather_lat is None:
+                r = requests.get("https://ipwho.is/", timeout=5)
+                d = r.json()
+                weather_lat = d.get("latitude")
+                weather_lon = d.get("longitude")
 
         if weather_lat is None:
             return
@@ -340,8 +399,30 @@ def aligned(draw, text, font, y, align="center", margin=12):
 def labeled_block(draw, x, label, value, value_font_=None):
     """Draws a small LABEL / value stack used across both screens."""
 
-    draw.text((x, 0), label, font=small_font, fill=WHITE)
+    draw.text((x, 0), label, font=small_font, fill=SECONDARY)
     draw.text((x, 17), value, font=value_font_ or value_font, fill=WHITE)
+
+
+def _anim_t(t):
+    """Return an animation time value; returns a fixed constant when
+    icon animations are disabled so all icons are frozen."""
+    return t if ICON_ANIMATIONS_ENABLED else 0.0
+
+
+def _draw_footer(draw, screen_id, default_text=""):
+    """Draw the footer hint line for a screen, respecting per-screen
+    footer_text and footer_enabled config fields."""
+    screen_cfg = next(
+        (s for s in CONFIG.get("screens", []) if s.get("id") == screen_id),
+        None,
+    )
+    if screen_cfg is None:
+        return
+    if not screen_cfg.get("footer_enabled", True):
+        return
+    text = screen_cfg.get("footer_text") or default_text
+    footer_align = CONFIG.get("alignment", {}).get("footer", "center")
+    aligned(draw, text, small_font, 292, footer_align)
 
 
 # ---------------------------------------------------------
@@ -374,7 +455,6 @@ def icon_cpu(draw, x, y, t, load_pct=0):
 
         draw.line((x+2, y+p, x+8, y+p), fill=WHITE, width=2)
         draw.line((x+32, y+p, x+38, y+p), fill=WHITE, width=2)
-
 
 def icon_thermometer(draw, x, y, fill_ratio=0.5):
     """fill_ratio 0..1 controls how full the animated mercury column is."""
@@ -622,7 +702,30 @@ def icon_fan(draw, x, y, t, rpm=0):
 # FRAMEBUFFER (vectorised with numpy for speed at higher FPS)
 # ---------------------------------------------------------
 
+def _apply_orientation(image):
+    """Rotate/transpose the composited frame per display.orientation config.
+
+    Orientations:
+      "normal"  -> 0° (no change)
+      "flipped" -> 180°
+      "left"    -> 90° CCW (image is transposed so the FB still gets W×H)
+      "right"   -> 90° CW
+    """
+    orientation = CONFIG.get("display", {}).get("orientation", "normal")
+
+    if orientation == "flipped":
+        return image.rotate(180)
+    if orientation == "left":
+        # 90° CCW — result size is H×W; transpose back to fit 480×320 FB.
+        return image.rotate(90, expand=True).resize((W, H), Image.LANCZOS)
+    if orientation == "right":
+        return image.rotate(-90, expand=True).resize((W, H), Image.LANCZOS)
+    return image
+
+
 def write_fb(image):
+
+    image = _apply_orientation(image)
 
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint16)
 
@@ -650,6 +753,7 @@ def draw_screen_clock(t, sysdata):
     image = Image.new("RGB", (W, H), BLACK)
     draw = ImageDraw.Draw(image)
 
+    at = _anim_t(t)
     now = datetime.now()
 
     aligned(draw, now.strftime("%I:%M:%S %p"), clock_font, 34, CONFIG["alignment"]["clock"])
@@ -659,19 +763,19 @@ def draw_screen_clock(t, sysdata):
 
     # WEATHER | HUMIDITY row, given extra room now that this screen
     # only carries clock + weather
-    icon_weather(draw, 40, 168, t)
-    draw.text((92, 172), "WEATHER", font=small_font, fill=WHITE)
+    icon_weather(draw, 40, 168, at)
+    draw.text((92, 172), "WEATHER", font=small_font, fill=SECONDARY)
     draw.text((92, 191), f"{weather_temp}°C", font=big_value_font, fill=WHITE)
 
     draw.line((240, 158, 240, 238), fill=WHITE, width=1)
 
-    icon_drop(draw, 270, 168, t)
-    draw.text((322, 172), "HUMIDITY", font=small_font, fill=WHITE)
+    icon_drop(draw, 270, 168, at)
+    draw.text((322, 172), "HUMIDITY", font=small_font, fill=SECONDARY)
     draw.text((322, 191), f"{weather_humidity}%", font=big_value_font, fill=WHITE)
 
     draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
 
-    centered(draw, "SYSTEM STATUS NEXT", small_font, 292)
+    _draw_footer(draw, "clock", "SYSTEM STATUS NEXT")
 
     return image
 
@@ -685,6 +789,7 @@ def draw_screen_system(t, sysdata):
     image = Image.new("RGB", (W, H), BLACK)
     draw = ImageDraw.Draw(image)
 
+    at = _anim_t(t)
     cpu = sysdata["cpu"]
     temp = sysdata["temp"]
     ram_used, ram_total = sysdata["ram"]
@@ -702,22 +807,22 @@ def draw_screen_system(t, sysdata):
     # FOUR SYSTEM COLUMNS
     # =====================================================
 
-    icon_cpu(draw, 34, 55, t, cpu)
-    draw.text((37, 89), "CPU", font=small_font, fill=WHITE)
+    icon_cpu(draw, 34, 55, at, cpu)
+    draw.text((37, 89), "CPU", font=small_font, fill=SECONDARY)
     draw.text((43, 106), f"{cpu:.0f}%", font=value_font, fill=WHITE)
 
     global displayed_temp
     displayed_temp += (temp - displayed_temp) * 0.15
     icon_thermometer(draw, 155, 55, displayed_temp / 100)
-    draw.text((145, 89), "TEMP", font=small_font, fill=WHITE)
+    draw.text((145, 89), "TEMP", font=small_font, fill=SECONDARY)
     draw.text((132, 106), f"{temp:.1f}°C", font=value_font, fill=WHITE)
 
-    icon_ram(draw, 276, 55, t)
-    draw.text((282, 89), "RAM", font=small_font, fill=WHITE)
+    icon_ram(draw, 276, 55, at)
+    draw.text((282, 89), "RAM", font=small_font, fill=SECONDARY)
     draw.text((264, 106), f"{ram_used:.1f}/{ram_total:.0f}GB", font=value_font, fill=WHITE)
 
-    icon_disk(draw, 397, 55, t)
-    draw.text((401, 89), "DISK", font=small_font, fill=WHITE)
+    icon_disk(draw, 397, 55, at)
+    draw.text((401, 89), "DISK", font=small_font, fill=SECONDARY)
     draw.text((389, 106), f"{disk_used:.0f}/{disk_total:.0f}GB", font=value_font, fill=WHITE)
 
     # dividers
@@ -750,27 +855,221 @@ def draw_screen_system(t, sysdata):
     # FAN | LAN IP row
     # =====================================================
 
-    icon_fan(draw, 25, 170, t, sysdata["fan_rpm"])
-    draw.text((68, 172), "FAN SPEED", font=small_font, fill=WHITE)
+    icon_fan(draw, 25, 170, at, sysdata["fan_rpm"])
+    draw.text((68, 172), "FAN SPEED", font=small_font, fill=SECONDARY)
     fan_txt = f"{sysdata['fan_rpm']} RPM" if sysdata["fan_rpm"] else "STOPPED"
     draw.text((68, 189), fan_txt, font=value_font, fill=WHITE)
 
     draw.line((240, 167, 240, 212), fill=WHITE, width=1)
 
-    icon_network(draw, 258, 170, t)
-    draw.text((304, 172), "LAN IP", font=small_font, fill=WHITE)
+    icon_network(draw, 258, 170, at)
+    draw.text((304, 172), "LAN IP", font=small_font, fill=SECONDARY)
     draw.text((304, 189), ip, font=ip_font, fill=WHITE)
 
     draw.line((12, 219, W-12, 219), fill=WHITE, width=1)
 
-    centered(draw, "CLOCK & WEATHER NEXT", small_font, 296)
+    _draw_footer(draw, "system", "CLOCK & WEATHER NEXT")
+
+    return image
+
+
+# ---------------------------------------------------------
+# SCREEN 2: NETWORK INFO
+# ---------------------------------------------------------
+
+def _get_wifi_ssid():
+    """Return the connected Wi-Fi SSID string, or None if not available."""
+    try:
+        result = subprocess.run(
+            ["iwgetid", "-r"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        ssid = result.stdout.strip()
+        return ssid if ssid else None
+    except Exception:
+        return None
+
+
+def _get_uptime():
+    """Return system uptime as a human-readable string."""
+    try:
+        with open("/proc/uptime") as f:
+            seconds = float(f.read().split()[0])
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        minutes = int((seconds % 3600) // 60)
+        if days:
+            return f"{days}d {hours:02d}h {minutes:02d}m"
+        return f"{hours:02d}h {minutes:02d}m"
+    except Exception:
+        return "--"
+
+
+def draw_screen_network(t, sysdata):
+    """Screen 2: Hostname, LAN IP, Wi-Fi SSID, uptime."""
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    at = _anim_t(t)
+    now = datetime.now()
+
+    draw.text((16, 14), "NETWORK INFO", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    # Hostname
+    try:
+        hostname = socket.gethostname()
+    except Exception:
+        hostname = "--"
+
+    icon_network(draw, 20, 55, at)
+    draw.text((75, 58), "HOSTNAME", font=small_font, fill=SECONDARY)
+    draw.text((75, 75), hostname, font=ip_font, fill=WHITE)
+
+    draw.line((12, 110, W-12, 110), fill=WHITE, width=1)
+
+    # LAN IP
+    draw.text((20, 120), "LAN IP", font=small_font, fill=SECONDARY)
+    draw.text((20, 138), sysdata["ip"], font=big_value_font, fill=WHITE)
+
+    draw.line((240, 115, 240, 175), fill=WHITE, width=1)
+
+    # Wi-Fi SSID
+    ssid = _get_wifi_ssid() or "Not connected"
+    draw.text((260, 120), "WI-FI SSID", font=small_font, fill=SECONDARY)
+    draw.text((260, 138), ssid[:16], font=ip_font, fill=WHITE)
+
+    draw.line((12, 185, W-12, 185), fill=WHITE, width=1)
+
+    # Uptime
+    draw.text((20, 195), "UPTIME", font=small_font, fill=SECONDARY)
+    draw.text((20, 213), _get_uptime(), font=big_value_font, fill=WHITE)
+
+    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+
+    _draw_footer(draw, "network", "SYSTEM STATUS NEXT")
+
+    return image
+
+
+# ---------------------------------------------------------
+# SCREEN 3: CPU STATS & PROCESSES
+# ---------------------------------------------------------
+
+# Ring buffer for CPU history sparkline (last 40 samples at ~1 s each).
+_cpu_history = [0.0] * 40
+
+
+def _update_cpu_history(cpu_pct):
+    _cpu_history.append(cpu_pct)
+    if len(_cpu_history) > 40:
+        _cpu_history.pop(0)
+
+
+def _get_top_process():
+    """Return (name, cpu%) for the top CPU-consuming process."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "comm,%cpu", "--sort=-%cpu", "--no-headers"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        line = result.stdout.splitlines()[0].strip()
+        parts = line.rsplit(None, 1)
+        name = parts[0][:14] if parts else "--"
+        pct = float(parts[1]) if len(parts) > 1 else 0.0
+        return name, pct
+    except Exception:
+        return "--", 0.0
+
+
+def _get_swap():
+    """Return (used_GB, total_GB) for swap."""
+    try:
+        data = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":")
+                data[k.strip()] = int(v.strip().split()[0])
+        total = data.get("SwapTotal", 0) / 1024 / 1024
+        free = data.get("SwapFree", 0) / 1024 / 1024
+        return total - free, total
+    except Exception:
+        return 0.0, 0.0
+
+
+def draw_screen_stats(t, sysdata):
+    """Screen 3: CPU history sparkline, top process, swap usage."""
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    now = datetime.now()
+    cpu = sysdata["cpu"]
+    _update_cpu_history(cpu)
+
+    draw.text((16, 14), "CPU STATS", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    # ---- Sparkline ----
+    spark_x0, spark_y0 = 16, 105
+    spark_w, spark_h = W - 32, 55
+    draw.text((16, 48), "CPU HISTORY", font=small_font, fill=SECONDARY)
+    draw.rectangle((spark_x0, spark_y0, spark_x0 + spark_w, spark_y0 + spark_h), outline=WHITE)
+
+    samples = _cpu_history[-40:]
+    if len(samples) > 1:
+        step = spark_w / (len(samples) - 1)
+        pts = []
+        for i, v in enumerate(samples):
+            sx = spark_x0 + int(i * step)
+            sy = spark_y0 + spark_h - int(spark_h * v / 100)
+            pts.append((sx, sy))
+        for i in range(len(pts) - 1):
+            draw.line([pts[i], pts[i + 1]], fill=WHITE, width=2)
+
+    draw.text((spark_x0 + spark_w - 50, 48), f"{cpu:.0f}%", font=value_font, fill=WHITE)
+
+    draw.line((12, 170, W-12, 170), fill=WHITE, width=1)
+
+    # ---- Top process ----
+    proc_name, proc_cpu = _get_top_process()
+    draw.text((16, 178), "TOP PROCESS", font=small_font, fill=SECONDARY)
+    draw.text((16, 196), proc_name, font=ip_font, fill=WHITE)
+    draw.text((260, 178), "CPU", font=small_font, fill=SECONDARY)
+    draw.text((260, 196), f"{proc_cpu:.1f}%", font=big_value_font, fill=WHITE)
+
+    draw.line((12, 222, W-12, 222), fill=WHITE, width=1)
+
+    # ---- Swap ----
+    swap_used, swap_total = _get_swap()
+    draw.text((16, 230), "SWAP", font=small_font, fill=SECONDARY)
+    if swap_total > 0:
+        draw.text((16, 248), f"{swap_used:.1f}/{swap_total:.1f}GB", font=ip_font, fill=WHITE)
+        swap_pct = swap_used / swap_total
+        draw.rectangle((16, 268, W - 16, 275), outline=WHITE)
+        draw.rectangle((18, 270, 18 + int((W - 36) * swap_pct), 273), fill=WHITE)
+    else:
+        draw.text((16, 248), "No swap", font=ip_font, fill=SECONDARY)
+
+    _draw_footer(draw, "stats", "CLOCK & WEATHER NEXT")
 
     return image
 
 
 SCREEN_RENDERER_MAP = {
-    "clock": draw_screen_clock,
-    "system": draw_screen_system,
+    "clock":   draw_screen_clock,
+    "system":  draw_screen_system,
+    "network": draw_screen_network,
+    "stats":   draw_screen_stats,
 }
 
 apply_config(CONFIG)
