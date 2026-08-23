@@ -773,9 +773,6 @@ SCREEN_RENDERER_MAP = {
     "system": draw_screen_system,
 }
 
-SCREEN_RENDERERS = [draw_screen_clock, draw_screen_system]
-NUM_SCREENS = len(SCREEN_RENDERERS)
-
 apply_config(CONFIG)
 
 

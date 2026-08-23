@@ -12,6 +12,7 @@ Then browse to http://<pi-ip>:8080/ from any device on the network.
 import os
 
 from flask import Flask, jsonify, request, send_from_directory
+import hmac
 
 import dashboard_config as cfgmod
 
@@ -19,6 +20,26 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
+
+# Optional shared-secret protection: set the MHS_CONFIG_TOKEN environment
+# variable to require clients to send it as `?token=...` or an
+# `X-Config-Token` header before they can read/change the config. Left
+# unset by default since this is meant for a trusted home LAN, but
+# recommended if the Pi is reachable beyond your own network.
+API_TOKEN = os.environ.get("MHS_CONFIG_TOKEN")
+
+
+@app.before_request
+def check_token():
+    if not API_TOKEN:
+        return None
+
+    supplied = request.headers.get("X-Config-Token") or request.args.get("token")
+
+    if not supplied or not hmac.compare_digest(supplied, API_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    return None
 
 
 @app.route("/")

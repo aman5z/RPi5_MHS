@@ -47,6 +47,22 @@ Changes are saved to `config.json` and picked up by the running
 `dashboard.py` process automatically (within about a second), no restart
 required.
 
+### Securing the config server
+
+`web_config.py` listens on all network interfaces with no authentication
+by default, which is fine on a trusted home LAN. If the Pi is reachable
+from a less trusted network, set the `MHS_CONFIG_TOKEN` environment
+variable before starting the server to require a shared secret:
+
+```bash
+MHS_CONFIG_TOKEN=some-long-random-value python3 web_config.py
+```
+
+Clients then need to send it as `?token=...` or an `X-Config-Token`
+header (the bundled `static/config.html` UI is unauthenticated convenience
+tooling for trusted networks; add the token to the URL as
+`http://<pi-ip>:8080/?token=...` if you enable it).
+
 ### Running both as services on boot
 
 Example systemd unit files are provided in `systemd/`:

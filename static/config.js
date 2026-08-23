@@ -85,6 +85,10 @@ function renderScreenList(screens) {
 
     list.appendChild(li);
   });
+}
+
+function initScreenListDragging() {
+  const list = document.getElementById("screen-list");
 
   list.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -132,7 +136,7 @@ function applyConfigToForm(cfg) {
 
   Object.entries(cfg.fonts).forEach(([key, value]) => {
     const el = document.getElementById(`font-${key}`);
-    if (el && key !== "family") el.value = value;
+    if (el) el.value = value;
   });
 
   document.getElementById("align-clock").value = cfg.alignment.clock;
@@ -144,8 +148,6 @@ function applyConfigToForm(cfg) {
   document.getElementById("timing-transitions_enabled").checked = cfg.timing.transitions_enabled;
 
   renderScreenList(cfg.screens);
-
-  return cfg.fonts.family;
 }
 
 function buildConfigFromForm() {
@@ -192,8 +194,8 @@ async function init() {
   });
 
   renderFontOptions(fontsData.families, config.fonts.family);
-  const selectedFamily = applyConfigToForm(config);
-  document.getElementById("font-family").value = selectedFamily;
+  applyConfigToForm(config);
+  initScreenListDragging();
 
   document.getElementById("save-btn").addEventListener("click", async () => {
     try {
