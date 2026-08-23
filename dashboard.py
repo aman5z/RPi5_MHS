@@ -4,7 +4,9 @@ import os
 import glob
 import time
 import math
+import json
 import socket
+import threading
 import subprocess
 import requests
 from datetime import datetime
@@ -13,6 +15,8 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
 import dashboard_config as cfgmod
+import tailscale_status
+import proxmox_status
 
 FB = "/dev/fb0"
 HWMON_ROOT = "/sys/class/hwmon"
@@ -182,6 +186,48 @@ displayed_temp = 0.0
 # cached hwmon path for the PWM fan, resolved once then reused
 _fan_hwmon_path = None
 _fan_hwmon_checked = False
+
+# ---------------------------------------------------------
+# LOCATION STATE (auto reverse-geocoded or manual)
+# ---------------------------------------------------------
+# Cached resolved location string shown on the clock screen footer.
+_location_string = ""
+_location_last_update = 0.0
+_LOCATION_CACHE_SECS = 1800  # re-resolve at most every 30 minutes
+
+
+# ---------------------------------------------------------
+# PING STATE
+# ---------------------------------------------------------
+# Dict: host -> deque of (timestamp, latency_ms or None)
+_ping_history = {}  # populated lazily from CONFIG ping_targets
+_PING_HISTORY_LEN = 40
+
+
+# ---------------------------------------------------------
+# DEVICES STATE
+# ---------------------------------------------------------
+# Managed by web_config.py in-process; dashboard reads the shared dict.
+# Imported lazily to avoid circular imports.
+_devices_store = None  # set by web_config after import
+
+
+def set_devices_store(store):
+    """Called by web_config to share the in-memory device store."""
+    global _devices_store
+    _devices_store = store
+
+
+# ---------------------------------------------------------
+# NOTIFICATIONS STATE
+# ---------------------------------------------------------
+_notifications_store = None  # set by web_config after import
+
+
+def set_notifications_store(store):
+    """Called by web_config to share the in-memory notifications list."""
+    global _notifications_store
+    _notifications_store = store
 
 
 # ---------------------------------------------------------
@@ -366,8 +412,110 @@ def update_weather():
 
 
 # ---------------------------------------------------------
-# TEXT HELPERS
+# LOCATION
 # ---------------------------------------------------------
+
+def update_location():
+    """Reverse-geocode the current weather lat/lon to a city/region
+    string and cache it.  Re-runs at most every _LOCATION_CACHE_SECS.
+    Falls back silently to empty string on any error."""
+
+    global _location_string, _location_last_update
+
+    loc_cfg = CONFIG.get("location", {})
+    mode = loc_cfg.get("mode", "auto")
+
+    if mode == "disabled":
+        _location_string = ""
+        return
+
+    if mode == "manual":
+        _location_string = str(loc_cfg.get("name", "")).strip()
+        return
+
+    # auto mode — reverse-geocode from weather coords
+    now = time.time()
+    if now - _location_last_update < _LOCATION_CACHE_SECS:
+        return
+
+    # Need lat/lon from weather state.
+    if weather_lat is None:
+        return
+
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "lat": weather_lat,
+                "lon": weather_lon,
+                "format": "json",
+            },
+            headers={"User-Agent": "RPi5-MHS-Dashboard/1.0"},
+            timeout=5,
+        )
+        d = r.json()
+        addr = d.get("address", {})
+        city = (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("village")
+            or addr.get("municipality")
+            or ""
+        )
+        state = addr.get("state", "")
+        country_code = addr.get("country_code", "").upper()
+        parts = [p for p in [city, state, country_code] if p]
+        _location_string = ", ".join(parts[:2]) if parts else ""
+        _location_last_update = now
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------
+# PING SAMPLER
+# ---------------------------------------------------------
+
+def _ping_host(host):
+    """Ping once; return latency_ms (float) or None on timeout/error."""
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", host],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if "time=" in line:
+                for part in line.split():
+                    if part.startswith("time="):
+                        return float(part[5:])
+        return None
+    except Exception:
+        return None
+
+
+def update_ping_samples():
+    """Sample each configured ping target (non-blocking; runs in a
+    background thread so a slow host does not stall the render loop)."""
+
+    targets = CONFIG.get("ping_targets", [])
+
+    def _sample():
+        now = time.time()
+        for tgt in targets:
+            host = tgt.get("host", "")
+            if not host:
+                continue
+            latency = _ping_host(host)
+            hist = _ping_history.setdefault(host, [])
+            hist.append((now, latency))
+            if len(hist) > _PING_HISTORY_LEN:
+                hist.pop(0)
+
+    t = threading.Thread(target=_sample, daemon=True)
+    t.start()
 
 def centered(draw, text, font, y):
     aligned(draw, text, font, y, "center")
@@ -698,6 +846,48 @@ def icon_fan(draw, x, y, t, rpm=0):
         )
 
 
+def icon_location(draw, x, y, t):
+    """Animated GPS/location pin: the outer ring pulses outward."""
+
+    cx, cy = x + 20, y + 16
+
+    # pulsing outer ring
+    pulse_r = 12 + int(3 * math.sin(t * 3))
+    draw.ellipse(
+        (cx - pulse_r, cy - pulse_r, cx + pulse_r, cy + pulse_r),
+        outline=WHITE,
+        width=1,
+    )
+
+    # pin body (teardrop)
+    draw.ellipse((cx - 8, cy - 8, cx + 8, cy + 8), outline=WHITE, width=2)
+    draw.polygon(
+        [(cx - 5, cy + 6), (cx + 5, cy + 6), (cx, cy + 18)],
+        outline=WHITE,
+    )
+    # inner dot
+    draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=WHITE)
+
+
+def icon_alert(draw, x, y, t):
+    """Warning triangle with a pulsing fill when active."""
+
+    pulse = int(t * 2) % 2 == 0
+    cx = x + 20
+
+    draw.polygon(
+        [(cx, y + 5), (x + 5, y + 35), (x + 35, y + 35)],
+        outline=WHITE,
+        width=2,
+    )
+    # exclamation mark
+    draw.rectangle((cx - 1, y + 14, cx + 1, y + 27), fill=WHITE)
+    if pulse:
+        draw.ellipse((cx - 2, y + 30, cx + 2, y + 34), fill=WHITE)
+    else:
+        draw.ellipse((cx - 2, y + 30, cx + 2, y + 34), outline=WHITE, width=1)
+
+
 # ---------------------------------------------------------
 # FRAMEBUFFER (vectorised with numpy for speed at higher FPS)
 # ---------------------------------------------------------
@@ -779,7 +969,15 @@ def draw_screen_clock(t, sysdata):
 
     draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
 
-    _draw_footer(draw, "clock", "SYSTEM STATUS NEXT")
+    # Footer: show resolved location (if enabled) with animated pin icon,
+    # otherwise fall back to the per-screen footer_text config.
+    loc_cfg = CONFIG.get("location", {})
+    loc_mode = loc_cfg.get("mode", "disabled")
+    if loc_mode != "disabled" and _location_string:
+        icon_location(draw, 4, 258, at)
+        draw.text((48, 264), _location_string[:30], font=small_font, fill=SECONDARY)
+    else:
+        _draw_footer(draw, "clock", "SYSTEM STATUS NEXT")
 
     return image
 
@@ -950,9 +1148,21 @@ def draw_screen_network(t, sysdata):
 
     draw.line((12, 185, W-12, 185), fill=WHITE, width=1)
 
-    # Uptime
+    # Uptime (left column)
     draw.text((20, 195), "UPTIME", font=small_font, fill=SECONDARY)
     draw.text((20, 213), _get_uptime(), font=big_value_font, fill=WHITE)
+
+    # Tailscale peer summary (right column)
+    # Shows compact "N/M online" count so the network screen is the natural
+    # home for it without overcrowding. Full peer list is on the devices screen.
+    ts = tailscale_status.get_status()
+    draw.line((240, 190, 240, 245), fill=WHITE, width=1)
+    draw.text((260, 195), "TAILSCALE", font=small_font, fill=SECONDARY)
+    if ts["available"]:
+        draw.text((260, 213), f"{ts['online_count']}/{ts['total_count']} online",
+                  font=ip_font, fill=WHITE)
+    else:
+        draw.text((260, 213), "Not running", font=small_font, fill=SECONDARY)
 
     draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
 
@@ -1069,11 +1279,405 @@ def draw_screen_stats(t, sysdata):
     return image
 
 
+# ---------------------------------------------------------
+# SCREEN 4: REMOTE DEVICES
+# ---------------------------------------------------------
+
+def _mini_bar(draw, x, y, w, h, pct, fill_color=None):
+    """Draw a small progress bar at (x,y) of size w×h."""
+    draw.rectangle((x, y, x + w, y + h), outline=WHITE)
+    filled = max(0, min(w - 2, int((w - 2) * pct)))
+    if filled:
+        draw.rectangle((x + 1, y + 1, x + 1 + filled, y + h - 1),
+                       fill=fill_color or WHITE)
+
+
+def _device_type_label(dtype):
+    """Short label for device type shown next to device name."""
+    return {"linux": "[L]", "windows": "[W]", "android": "[A]"}.get(str(dtype).lower(), "[?]")
+
+
+def draw_screen_devices(t, sysdata):
+    """Screen 4: Remote device stats + Tailscale peer list + Proxmox backup summary.
+
+    Remote devices are sourced from the shared in-memory store populated by
+    web_config.py's POST /api/devices/report endpoint.
+
+    Proxmox backup status is shown as a compact banner at the bottom of the
+    devices list — it is the natural home since Proxmox is itself a remote
+    device/hypervisor being monitored.
+    """
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    at = _anim_t(t)
+    now = datetime.now()
+    ALERT = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
+    WARN  = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("warn_color",  "#FFAA00"))
+
+    draw.text((16, 14), "REMOTE DEVICES", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    devices = list((_devices_store or {}).values())
+    offline_threshold = CONFIG.get("alerts", {}).get("device_offline_s", 90)
+
+    if not devices:
+        draw.text((20, 60), "No devices reporting.", font=ip_font, fill=SECONDARY)
+        draw.text((20, 80), "Run agents/linux_report.sh or", font=small_font, fill=SECONDARY)
+        draw.text((20, 95), "agents/windows_report.ps1 on", font=small_font, fill=SECONDARY)
+        draw.text((20, 110), "remote machines.", font=small_font, fill=SECONDARY)
+    else:
+        now_ts = time.time()
+        row_h = 38
+        max_rows = 4
+        for i, dev in enumerate(devices[:max_rows]):
+            y0 = 48 + i * row_h
+            online = (now_ts - dev.get("last_seen", 0)) < offline_threshold
+            status_color = WHITE if online else ALERT
+            type_label = _device_type_label(dev.get("type", ""))
+            name = (dev.get("name") or dev.get("device_id", "?"))[:14]
+            draw.text((12, y0), f"{type_label} {name}", font=small_font, fill=status_color)
+            draw.text((12, y0 + 13), "ON" if online else "OFF",
+                      font=small_font, fill=status_color)
+
+            cpu_pct  = (dev.get("cpu",  0) or 0) / 100
+            ram_used  = dev.get("ram_used",  0) or 0
+            ram_total = dev.get("ram_total", 1) or 1
+            disk_used  = dev.get("disk_used",  0) or 0
+            disk_total = dev.get("disk_total", 1) or 1
+
+            # Mini bar: CPU
+            draw.text((130, y0), "CPU", font=small_font, fill=SECONDARY)
+            _mini_bar(draw, 160, y0 + 2, 70, 10, cpu_pct)
+
+            # Mini bar: RAM
+            draw.text((245, y0), "RAM", font=small_font, fill=SECONDARY)
+            _mini_bar(draw, 275, y0 + 2, 70, 10, ram_used / ram_total)
+
+            # Mini bar: Disk
+            draw.text((360, y0), "DSK", font=small_font, fill=SECONDARY)
+            _mini_bar(draw, 388, y0 + 2, 70, 10, disk_used / disk_total)
+
+            if i < max_rows - 1:
+                draw.line((12, y0 + row_h - 2, W-12, y0 + row_h - 2),
+                          fill=SECONDARY, width=1)
+
+        if len(devices) > max_rows:
+            draw.text((12, 48 + max_rows * row_h),
+                      f"+{len(devices)-max_rows} more", font=small_font, fill=SECONDARY)
+
+    # ---- Proxmox backup banner ----------------------------------------
+    # Shown at the bottom of this screen; see proxmox_status.py for details.
+    prx_cfg = CONFIG.get("proxmox", {})
+    if prx_cfg.get("enabled"):
+        bk = proxmox_status.get_backups(prx_cfg)
+        draw.line((12, 218, W-12, 218), fill=WHITE, width=1)
+        if bk["available"] and bk["backups"]:
+            b = bk["backups"][0]
+            age_s = bk.get("last_ok_age_s")
+            age_str = ""
+            if age_s is not None:
+                if age_s < 3600:
+                    age_str = f"{int(age_s/60)}m ago"
+                elif age_s < 86400:
+                    age_str = f"{int(age_s/3600)}h ago"
+                else:
+                    age_str = f"{int(age_s/86400)}d ago"
+            status_txt = b.get("status", "?")
+            color = WHITE
+            staleness_h = prx_cfg.get("staleness_hours", 24)
+            if bk["any_failed"] or (age_s is not None and age_s > staleness_h * 3600):
+                color = WARN
+            draw.text((12, 222), "BACKUP", font=small_font, fill=SECONDARY)
+            draw.text((80, 222), f"{status_txt}  {age_str}",
+                      font=small_font, fill=color)
+        else:
+            draw.text((12, 222), "BACKUP", font=small_font, fill=SECONDARY)
+            draw.text((80, 222), bk.get("error") or "No data", font=small_font, fill=SECONDARY)
+
+    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "devices", "CLOCK & WEATHER NEXT")
+
+    return image
+
+
+# ---------------------------------------------------------
+# SCREEN 5: PING / LATENCY GRAPH
+# ---------------------------------------------------------
+
+def draw_screen_ping(t, sysdata):
+    """Screen 5: Sparkline latency graph per configured ping target."""
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    now = datetime.now()
+    ALERT = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
+
+    draw.text((16, 14), "PING / LATENCY", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    targets = CONFIG.get("ping_targets", [])
+
+    if not targets:
+        draw.text((20, 60), "No ping targets configured.", font=ip_font, fill=SECONDARY)
+        draw.text((20, 78), "Add targets in the web config.", font=small_font, fill=SECONDARY)
+        _draw_footer(draw, "ping", "CLOCK & WEATHER NEXT")
+        return image
+
+    # Layout: up to 3 targets, each in a horizontal band ~80px tall.
+    band_h = min(70, (280 - 50) // min(len(targets), 3))
+    spark_w = W - 32
+
+    for i, tgt in enumerate(targets[:3]):
+        host  = tgt.get("host", "")
+        label = tgt.get("label", host)[:14]
+        hist  = _ping_history.get(host, [])
+
+        y0 = 48 + i * (band_h + 8)
+        spark_y = y0 + 16
+        spark_h = band_h - 20
+
+        # Latest latency value
+        last_ms = None
+        if hist:
+            _, last_ms = hist[-1]
+        val_str = f"{last_ms:.1f}ms" if last_ms is not None else "TIMEOUT"
+        val_color = ALERT if last_ms is None else WHITE
+
+        draw.text((12, y0), label, font=small_font, fill=SECONDARY)
+        draw.text((W - 100, y0), val_str, font=small_font, fill=val_color)
+
+        # Sparkline box
+        draw.rectangle((12, spark_y, 12 + spark_w, spark_y + spark_h), outline=WHITE)
+
+        if len(hist) > 1:
+            samples = hist[-40:]
+            # Scale: max latency visible = 500ms; anything above clips.
+            max_ms = max((v for _, v in samples if v is not None), default=500) or 500
+            max_ms = max(max_ms, 10)
+            step = spark_w / (len(samples) - 1)
+            pts = []
+            for j, (_, v) in enumerate(samples):
+                sx = 12 + int(j * step)
+                if v is None:
+                    pts.append(None)
+                else:
+                    sy = spark_y + spark_h - int(spark_h * min(v, max_ms) / max_ms)
+                    pts.append((sx, sy))
+            # Draw segments, skipping across None (timeout) gaps
+            for j in range(len(pts) - 1):
+                if pts[j] is None:
+                    # Red dot for timeout
+                    bx = 12 + int(j * step)
+                    draw.ellipse((bx - 2, spark_y + spark_h // 2 - 2,
+                                  bx + 2, spark_y + spark_h // 2 + 2),
+                                 fill=ALERT)
+                elif pts[j + 1] is not None:
+                    draw.line([pts[j], pts[j + 1]], fill=WHITE, width=2)
+
+        if i < min(len(targets), 3) - 1:
+            draw.line((12, y0 + band_h + 4, W-12, y0 + band_h + 4),
+                      fill=SECONDARY, width=1)
+
+    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "ping", "CLOCK & WEATHER NEXT")
+
+    return image
+
+
+# ---------------------------------------------------------
+# SCREEN 6: ALERTS
+# ---------------------------------------------------------
+
+def _collect_alerts(sysdata):
+    """Return a list of (severity, message) tuples for current alert conditions.
+
+    severity is 'alert' (critical) or 'warn' (warning).
+    Conditions checked:
+      - Remote devices offline
+      - Proxmox backup failed/stale
+      - Local CPU/temp/disk thresholds
+      - Ping target timeouts
+    """
+    alerts_cfg = CONFIG.get("alerts", {})
+    offline_threshold = alerts_cfg.get("device_offline_s", 90)
+    cpu_warn    = alerts_cfg.get("cpu_warn_pct",  85)
+    temp_warn   = alerts_cfg.get("temp_warn_c",   75)
+    disk_warn   = alerts_cfg.get("disk_warn_pct", 90)
+    now_ts = time.time()
+
+    items = []
+
+    # Remote devices
+    for dev in list((_devices_store or {}).values()):
+        age = now_ts - dev.get("last_seen", 0)
+        if age >= offline_threshold:
+            name = dev.get("name") or dev.get("device_id", "?")
+            items.append(("alert", f"DEVICE OFFLINE: {name[:18]}"))
+
+    # Proxmox backup
+    prx_cfg = CONFIG.get("proxmox", {})
+    if prx_cfg.get("enabled"):
+        bk = proxmox_status.get_backups(prx_cfg)
+        if bk["available"]:
+            staleness_s = prx_cfg.get("staleness_hours", 24) * 3600
+            if bk["any_failed"]:
+                items.append(("alert", "PROXMOX BACKUP FAILED"))
+            elif bk.get("last_ok_age_s") is not None and bk["last_ok_age_s"] > staleness_s:
+                age_h = int(bk["last_ok_age_s"] / 3600)
+                items.append(("warn", f"BACKUP STALE: {age_h}h ago"))
+
+    # Local CPU
+    cpu = sysdata.get("cpu", 0)
+    if cpu >= cpu_warn:
+        items.append(("warn", f"HIGH CPU: {cpu:.0f}%"))
+
+    # Local temp
+    temp = sysdata.get("temp", 0)
+    if temp >= temp_warn:
+        items.append(("warn", f"HIGH TEMP: {temp:.1f}°C"))
+
+    # Local disk
+    disk_used, disk_total = sysdata.get("disk", (0, 1))
+    disk_pct = 100 * disk_used / disk_total if disk_total else 0
+    if disk_pct >= disk_warn:
+        items.append(("warn", f"DISK FULL: {disk_pct:.0f}%"))
+
+    # Ping timeouts
+    for tgt in CONFIG.get("ping_targets", []):
+        host = tgt.get("host", "")
+        hist = _ping_history.get(host, [])
+        if hist:
+            _, last_ms = hist[-1]
+            if last_ms is None:
+                label = tgt.get("label", host)[:14]
+                items.append(("warn", f"PING FAIL: {label}"))
+
+    return items
+
+
+def draw_screen_alerts(t, sysdata):
+    """Screen 6: Aggregated system alerts with severity colour coding."""
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    at = _anim_t(t)
+    now = datetime.now()
+    ALERT = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
+    WARN  = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("warn_color",  "#FFAA00"))
+
+    draw.text((16, 14), "ALERTS", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    items = _collect_alerts(sysdata)
+
+    if not items:
+        icon_network(draw, 210, 100, at)
+        draw.text((20, 90), "All systems normal.", font=ip_font, fill=WHITE)
+        draw.text((20, 112), "No active alerts.", font=small_font, fill=SECONDARY)
+    else:
+        icon_alert(draw, W - 44, 8, at)
+        # Cap to the number of lines that fit in 320px (header=40, footer=68)
+        max_lines = 8
+        line_h = 26
+        visible = items[:max_lines]
+        for idx, (sev, msg) in enumerate(visible):
+            y = 48 + idx * line_h
+            color = ALERT if sev == "alert" else WARN
+            prefix = "! " if sev == "alert" else "~ "
+            draw.text((12, y), prefix + msg[:36], font=small_font, fill=color)
+        if len(items) > max_lines:
+            extra = len(items) - max_lines
+            draw.text((12, 48 + max_lines * line_h),
+                      f"+{extra} more", font=small_font, fill=SECONDARY)
+
+    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "alerts", "CLOCK & WEATHER NEXT")
+
+    return image
+
+
+# ---------------------------------------------------------
+# SCREEN 7: NOTIFICATIONS
+# ---------------------------------------------------------
+
+def _relative_time(ts):
+    """Return a human-readable relative time string like '5m ago'."""
+    if not ts:
+        return ""
+    diff = time.time() - ts
+    if diff < 60:
+        return f"{int(diff)}s ago"
+    if diff < 3600:
+        return f"{int(diff/60)}m ago"
+    if diff < 86400:
+        return f"{int(diff/3600)}h ago"
+    return f"{int(diff/86400)}d ago"
+
+
+def draw_screen_notifications(t, sysdata):
+    """Screen 7: Most-recent 4 notifications from the inbox.
+
+    Note: Populating this inbox requires a companion app on Android
+    (NotificationListenerService) or Windows (UserNotificationListener)
+    that POSTs to /api/notifications.  Those companion apps are out of
+    scope for this implementation — this builds the receiving/display side.
+    """
+
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+
+    now = datetime.now()
+
+    draw.text((16, 14), "NOTIFICATIONS", font=title_font, fill=WHITE)
+    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
+    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+
+    notifs = list(_notifications_store or [])
+
+    if not notifs:
+        draw.text((20, 80), "No notifications.", font=ip_font, fill=SECONDARY)
+        draw.text((20, 100), "Requires a companion app", font=small_font, fill=SECONDARY)
+        draw.text((20, 116), "on Android or Windows.", font=small_font, fill=SECONDARY)
+    else:
+        visible = notifs[:4]  # show 4 most recent
+        row_h = 50
+        for i, n in enumerate(visible):
+            y0 = 48 + i * row_h
+            app   = (n.get("app") or n.get("device_id") or "")[:10]
+            title = (n.get("title") or "")[:28]
+            body  = (n.get("body") or "")[:34]
+            ts    = n.get("timestamp")
+            rel   = _relative_time(ts)
+
+            draw.text((12, y0),      f"[{app}] {title}", font=small_font, fill=WHITE)
+            draw.text((12, y0 + 14), body,               font=small_font, fill=SECONDARY)
+            draw.text((W - 80, y0),  rel,                font=small_font, fill=SECONDARY)
+            if i < len(visible) - 1:
+                draw.line((12, y0 + row_h - 4, W-12, y0 + row_h - 4),
+                          fill=SECONDARY, width=1)
+
+    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "notifications", "CLOCK & WEATHER NEXT")
+
+    return image
+
+
 SCREEN_RENDERER_MAP = {
-    "clock":   draw_screen_clock,
-    "system":  draw_screen_system,
-    "network": draw_screen_network,
-    "stats":   draw_screen_stats,
+    "clock":         draw_screen_clock,
+    "system":        draw_screen_system,
+    "network":       draw_screen_network,
+    "stats":         draw_screen_stats,
+    "devices":       draw_screen_devices,
+    "ping":          draw_screen_ping,
+    "alerts":        draw_screen_alerts,
+    "notifications": draw_screen_notifications,
 }
 
 apply_config(CONFIG)
@@ -1136,6 +1740,8 @@ def main():
             # no need to hit /proc, statvfs etc. at 15fps
             if now - last_sysdata_refresh >= 1.0:
                 update_weather()
+                update_location()
+                update_ping_samples()
                 sysdata = collect_sysdata()
                 last_sysdata_refresh = now
 

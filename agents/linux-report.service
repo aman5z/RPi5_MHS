@@ -1,0 +1,10 @@
+[Unit]
+Description=MHS Dashboard device stats reporter
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/mhs-report.env
+ExecStart=/usr/local/bin/linux_report.sh
+# Silence curl output; errors are visible in journalctl.
+StandardOutput=null
+StandardError=journal

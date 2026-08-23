@@ -31,6 +31,14 @@
         <input type="color" id="theme-text_secondary">
       </label>
     </div>
+    <div class="field-row">
+      <label>Alert colour
+        <input type="color" id="theme-alert_color">
+      </label>
+      <label>Warning colour
+        <input type="color" id="theme-warn_color">
+      </label>
+    </div>
   </section>
 
   <!-- DISPLAY -->
@@ -137,7 +145,7 @@
   <section class="card">
     <h2>Weather &amp; Location</h2>
     <div class="field-row">
-      <label>Location mode
+      <label>Weather location mode
         <select id="weather-mode">
           <option value="auto">Auto (IP geolocation)</option>
           <option value="manual">Manual (enter coordinates)</option>
@@ -150,6 +158,96 @@
       </label>
       <label>Longitude
         <input type="number" step="any" id="weather-longitude" placeholder="e.g. -0.1278">
+      </label>
+    </div>
+    <h3 style="margin-top:12px">Clock screen location footer</h3>
+    <p class="hint">The location shown is IP-based geolocation, not a physical GPS module, unless you have real GPS hardware.</p>
+    <div class="field-row">
+      <label>Location mode
+        <select id="location-mode">
+          <option value="auto">Auto (reverse-geocode from weather coords)</option>
+          <option value="manual">Manual (enter name below)</option>
+          <option value="disabled">Disabled (use screen footer text)</option>
+        </select>
+      </label>
+    </div>
+    <div id="location-manual-fields" class="field-row" style="display:none">
+      <label>Location name
+        <input type="text" id="location-name" placeholder="e.g. London, UK">
+      </label>
+    </div>
+  </section>
+
+  <!-- PING TARGETS -->
+  <section class="card">
+    <h2>Ping / Latency Targets</h2>
+    <p class="hint">Hosts pinged every second; results shown on the Ping screen.</p>
+    <ul id="ping-list" class="screen-list"></ul>
+    <div class="field-row" style="margin-top:8px">
+      <button type="button" id="ping-add-btn" class="secondary">+ Add Target</button>
+    </div>
+  </section>
+
+  <!-- PROXMOX -->
+  <section class="card">
+    <h2>Proxmox Backup Status</h2>
+    <p class="hint">Create an API token in the Proxmox web UI: Datacenter → Permissions → API Tokens → Add.</p>
+    <div class="field-row">
+      <label class="checkbox-label">
+        <input type="checkbox" id="proxmox-enabled">
+        Enable Proxmox integration
+      </label>
+    </div>
+    <div class="field-row">
+      <label>Host / IP
+        <input type="text" id="proxmox-host" placeholder="proxmox.lan or 192.168.1.x">
+      </label>
+      <label>Token ID
+        <input type="text" id="proxmox-token_id" placeholder="root@pam!dashboard">
+      </label>
+    </div>
+    <div class="field-row">
+      <label>Token Secret
+        <input type="password" id="proxmox-token_secret" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+      </label>
+      <label>Backup staleness threshold (hours)
+        <input type="number" min="1" max="720" id="proxmox-staleness_hours" value="24">
+      </label>
+    </div>
+    <div class="field-row">
+      <label class="checkbox-label">
+        <input type="checkbox" id="proxmox-verify_ssl" checked>
+        Verify SSL certificate (uncheck for self-signed certs)
+      </label>
+    </div>
+  </section>
+
+  <!-- ALERTS -->
+  <section class="card">
+    <h2>Alert Thresholds</h2>
+    <div class="field-grid">
+      <label>CPU warning (%)
+        <input type="number" min="1" max="100" id="alerts-cpu_warn_pct">
+      </label>
+      <label>Temperature warning (°C)
+        <input type="number" min="1" max="150" id="alerts-temp_warn_c">
+      </label>
+      <label>Disk warning (%)
+        <input type="number" min="1" max="100" id="alerts-disk_warn_pct">
+      </label>
+      <label>Device offline after (s)
+        <input type="number" min="10" max="3600" id="alerts-device_offline_s">
+      </label>
+    </div>
+  </section>
+
+  <!-- NOTIFICATIONS -->
+  <section class="card">
+    <h2>Notifications</h2>
+    <p class="hint">Notifications are received via POST /api/notifications from a companion app. The dashboard shows the most recent ones.</p>
+    <div class="field-grid">
+      <label>Max stored notifications
+        <input type="number" min="1" max="10000" id="notifications-max_count">
       </label>
     </div>
   </section>
