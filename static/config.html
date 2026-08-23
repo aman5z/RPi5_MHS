@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MHS Dashboard Config</title>
+<link rel="stylesheet" href="config.css">
+</head>
+<body>
+<header>
+  <h1>RPi5 MHS Dashboard Configuration</h1>
+  <p class="subtitle">Changes apply live &mdash; the physical screen picks them up within a second of saving.</p>
+</header>
+
+<main>
+  <div id="status" class="status" hidden></div>
+
+  <section class="card">
+    <h2>Theme</h2>
+    <div class="theme-presets" id="theme-presets"></div>
+    <div class="field-row">
+      <label>Background
+        <input type="color" id="theme-background">
+      </label>
+      <label>Foreground / Text
+        <input type="color" id="theme-foreground">
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Fonts</h2>
+    <div class="field-row">
+      <label>Font Family
+        <select id="font-family"></select>
+      </label>
+    </div>
+    <div class="field-grid">
+      <label>Clock size <input type="number" min="6" max="120" id="font-clock_size"></label>
+      <label>Date size <input type="number" min="6" max="120" id="font-date_size"></label>
+      <label>Value size <input type="number" min="6" max="120" id="font-value_size"></label>
+      <label>Big value size <input type="number" min="6" max="120" id="font-big_value_size"></label>
+      <label>Small text size <input type="number" min="6" max="120" id="font-small_size"></label>
+      <label>IP text size <input type="number" min="6" max="120" id="font-ip_size"></label>
+      <label>Title size <input type="number" min="6" max="120" id="font-title_size"></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Alignment</h2>
+    <div class="field-row">
+      <label>Clock
+        <select id="align-clock">
+          <option value="left">Left</option>
+          <option value="center">Center</option>
+          <option value="right">Right</option>
+        </select>
+      </label>
+      <label>Date
+        <select id="align-date">
+          <option value="left">Left</option>
+          <option value="center">Center</option>
+          <option value="right">Right</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Screens</h2>
+    <p class="hint">Enable/disable and reorder (drag) the screens shown in the slideshow. At least one must stay enabled.</p>
+    <ul id="screen-list" class="screen-list"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Timing &amp; Animation</h2>
+    <div class="field-grid">
+      <label>Frames per second <input type="number" min="1" max="30" id="timing-fps"></label>
+      <label>Screen duration (s) <input type="number" min="1" max="120" step="0.5" id="timing-screen_duration"></label>
+      <label>Transition duration (s) <input type="number" min="0.05" max="3" step="0.05" id="timing-transition_duration"></label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="timing-transitions_enabled">
+        Enable slide transitions
+      </label>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button id="save-btn" class="primary">Save &amp; Apply</button>
+    <button id="reset-btn" class="secondary">Reset to Defaults</button>
+  </div>
+</main>
+
+<script src="config.js"></script>
+</body>
+</html>

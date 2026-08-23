@@ -11,34 +11,103 @@ from PIL import Image, ImageDraw, ImageFont
 
 import numpy as np
 
+import dashboard_config as cfgmod
+
 FB = "/dev/fb0"
 HWMON_ROOT = "/sys/class/hwmon"
 THERMAL_ZONE = "/sys/class/thermal/thermal_zone0/temp"
 
 W, H = 480, 320
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
-clock_font = ImageFont.truetype(FONT_BOLD, 55)
-date_font = ImageFont.truetype(FONT_BOLD, 16)
-value_font = ImageFont.truetype(FONT_BOLD, 19)
-big_value_font = ImageFont.truetype(FONT_BOLD, 22)
-small_font = ImageFont.truetype(FONT, 14)
-ip_font = ImageFont.truetype(FONT_BOLD, 15)
-title_font = ImageFont.truetype(FONT_BOLD, 15)
 
 # ---------------------------------------------------------
-# TIMING / SLIDESHOW CONFIG
+# CONFIG (theme / fonts / alignment / timing / screens), loaded from
+# config.json and hot-reloaded while the dashboard runs so changes made
+# through the web configuration UI are picked up without a restart.
 # ---------------------------------------------------------
 
-FPS = 15
+CONFIG = cfgmod.load_config()
+_config_mtime = cfgmod.get_mtime()
+
+WHITE = cfgmod.hex_to_rgb(CONFIG["theme"]["foreground"])
+BLACK = cfgmod.hex_to_rgb(CONFIG["theme"]["background"])
+
+FPS = CONFIG["timing"]["fps"]
 FRAME_INTERVAL = 1.0 / FPS
-SCREEN_DURATION = 5.0        # seconds each screen is shown
-TRANSITION_DURATION = 0.45   # seconds for the slide transition
-NUM_SCREENS = 2               # 0 = clock/weather, 1 = system status
+SCREEN_DURATION = CONFIG["timing"]["screen_duration"]
+TRANSITION_DURATION = CONFIG["timing"]["transition_duration"]
+TRANSITIONS_ENABLED = CONFIG["timing"]["transitions_enabled"]
+
+_font_cache = {}
+
+
+def get_font(path, size):
+    key = (path, size)
+
+    if key not in _font_cache:
+        try:
+            _font_cache[key] = ImageFont.truetype(path, size)
+        except Exception:
+            _font_cache[key] = ImageFont.truetype(cfgmod.FALLBACK_FONT_REGULAR, size)
+
+    return _font_cache[key]
+
+
+def apply_config(cfg):
+    """(Re)compute every derived global (colors, fonts, timing, screen
+    list) from a config dict. Called at startup and whenever
+    config.json changes on disk."""
+
+    global CONFIG, WHITE, BLACK, FPS, FRAME_INTERVAL
+    global SCREEN_DURATION, TRANSITION_DURATION, TRANSITIONS_ENABLED
+    global clock_font, date_font, value_font, big_value_font
+    global small_font, ip_font, title_font
+    global SCREEN_RENDERERS, NUM_SCREENS
+
+    CONFIG = cfg
+
+    WHITE = cfgmod.hex_to_rgb(cfg["theme"]["foreground"])
+    BLACK = cfgmod.hex_to_rgb(cfg["theme"]["background"])
+
+    timing = cfg["timing"]
+    FPS = timing["fps"]
+    FRAME_INTERVAL = 1.0 / FPS
+    SCREEN_DURATION = timing["screen_duration"]
+    TRANSITION_DURATION = timing["transition_duration"]
+    TRANSITIONS_ENABLED = timing["transitions_enabled"]
+
+    fonts = cfg["fonts"]
+    font_regular, font_bold = cfgmod.resolve_font_paths(fonts["family"])
+
+    clock_font = get_font(font_bold, fonts["clock_size"])
+    date_font = get_font(font_bold, fonts["date_size"])
+    value_font = get_font(font_bold, fonts["value_size"])
+    big_value_font = get_font(font_bold, fonts["big_value_size"])
+    small_font = get_font(font_regular, fonts["small_size"])
+    ip_font = get_font(font_bold, fonts["ip_size"])
+    title_font = get_font(font_bold, fonts["title_size"])
+
+    enabled_ids = [s["id"] for s in cfg["screens"] if s["enabled"]]
+
+    if not enabled_ids:
+        enabled_ids = ["clock"]
+
+    SCREEN_RENDERERS = [SCREEN_RENDERER_MAP[sid] for sid in enabled_ids if sid in SCREEN_RENDERER_MAP]
+
+    if not SCREEN_RENDERERS:
+        SCREEN_RENDERERS = [draw_screen_clock]
+
+    NUM_SCREENS = len(SCREEN_RENDERERS)
+
+
+def reload_config_if_changed():
+    global _config_mtime
+
+    mtime = cfgmod.get_mtime()
+
+    if mtime != _config_mtime:
+        _config_mtime = mtime
+        apply_config(cfgmod.load_config())
+
 
 # ---------------------------------------------------------
 # STATE
@@ -242,10 +311,23 @@ def update_weather():
 # ---------------------------------------------------------
 
 def centered(draw, text, font, y):
+    aligned(draw, text, font, y, "center")
+
+
+def aligned(draw, text, font, y, align="center", margin=12):
+    """Draw ``text`` on one line, positioned per ``align``
+    ("left"/"center"/"right"), matching the configurable clock/date
+    alignment settings."""
 
     box = draw.textbbox((0, 0), text, font=font)
+    text_w = box[2] - box[0]
 
-    x = (W - (box[2] - box[0])) // 2
+    if align == "left":
+        x = margin
+    elif align == "right":
+        x = W - margin - text_w
+    else:
+        x = (W - text_w) // 2
 
     draw.text(
         (x, y),
@@ -255,11 +337,11 @@ def centered(draw, text, font, y):
     )
 
 
-def labeled_block(draw, x, label, value, value_font_=value_font):
+def labeled_block(draw, x, label, value, value_font_=None):
     """Draws a small LABEL / value stack used across both screens."""
 
     draw.text((x, 0), label, font=small_font, fill=WHITE)
-    draw.text((x, 17), value, font=value_font_, fill=WHITE)
+    draw.text((x, 17), value, font=value_font_ or value_font, fill=WHITE)
 
 
 # ---------------------------------------------------------
@@ -570,8 +652,8 @@ def draw_screen_clock(t, sysdata):
 
     now = datetime.now()
 
-    centered(draw, now.strftime("%I:%M:%S %p"), clock_font, 34)
-    centered(draw, now.strftime("%A, %d %b %Y").upper(), date_font, 100)
+    aligned(draw, now.strftime("%I:%M:%S %p"), clock_font, 34, CONFIG["alignment"]["clock"])
+    aligned(draw, now.strftime("%A, %d %b %Y").upper(), date_font, 100, CONFIG["alignment"]["date"])
 
     draw.line((12, 140, W-12, 140), fill=WHITE, width=1)
 
@@ -686,7 +768,15 @@ def draw_screen_system(t, sysdata):
     return image
 
 
+SCREEN_RENDERER_MAP = {
+    "clock": draw_screen_clock,
+    "system": draw_screen_system,
+}
+
 SCREEN_RENDERERS = [draw_screen_clock, draw_screen_system]
+NUM_SCREENS = len(SCREEN_RENDERERS)
+
+apply_config(CONFIG)
 
 
 def collect_sysdata():
@@ -749,13 +839,22 @@ def main():
                 sysdata = collect_sysdata()
                 last_sysdata_refresh = now
 
+                # pick up any changes saved from the web config UI
+                reload_config_if_changed()
+                current_screen %= NUM_SCREENS
+
             elapsed = now - screen_start
 
             if not transitioning and elapsed >= SCREEN_DURATION:
                 transitioning = True
                 transition_start = now
 
-            if transitioning:
+            if transitioning and not TRANSITIONS_ENABLED:
+                transitioning = False
+                current_screen = (current_screen + 1) % NUM_SCREENS
+                screen_start = now
+                frame = render_screen(current_screen, now, sysdata)
+            elif transitioning:
                 prog = (now - transition_start) / TRANSITION_DURATION
 
                 if prog >= 1.0:
