@@ -9,9 +9,14 @@ Run with:
 Then browse to http://<pi-ip>:8080/ from any device on the network.
 """
 
+import copy
 import os
+import secrets
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import (
+    Flask, jsonify, redirect,
+    request, send_from_directory, session, url_for,
+)
 import hmac
 
 import dashboard_config as cfgmod
@@ -21,6 +26,21 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
+# A fresh secret key is generated each run so session cookies are
+# invalidated on restart (acceptable for a local dashboard server).
+app.secret_key = secrets.token_hex(32)
+
+# ---------------------------------------------------------------------------
+# Login credentials.
+# Override via environment variables MHS_ADMIN_USER / MHS_ADMIN_PASSWORD
+# for per-instance secrets; the strings below are fallback defaults that
+# work out-of-the-box on a trusted home LAN.
+# CHANGE THESE (or set the env-vars) for any non-trusted-LAN deployment.
+# ---------------------------------------------------------------------------
+ADMIN_USERNAME = os.environ.get("MHS_ADMIN_USER", "admin")       # Change for production use.
+ADMIN_PASSWORD = os.environ.get("MHS_ADMIN_PASSWORD", "06112024") # Change for production use.
+# ---------------------------------------------------------------------------
+
 # Optional shared-secret protection: set the MHS_CONFIG_TOKEN environment
 # variable to require clients to send it as `?token=...` or an
 # `X-Config-Token` header before they can read/change the config. Left
@@ -29,17 +49,75 @@ app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 API_TOKEN = os.environ.get("MHS_CONFIG_TOKEN")
 
 
+def _is_authenticated():
+    """Return True if the current request is authenticated via either
+    the session cookie (browser login) or the MHS_CONFIG_TOKEN bypass
+    (programmatic / API access)."""
+
+    # Session-cookie path (browser UI).
+    if session.get("logged_in"):
+        return True
+
+    # Token bypass — allows existing scripts/integrations to keep working
+    # even when the MHS_CONFIG_TOKEN env-var is set.
+    if API_TOKEN:
+        supplied = (
+            request.headers.get("X-Config-Token")
+            or request.args.get("token")
+        )
+        if supplied and hmac.compare_digest(supplied, API_TOKEN):
+            return True
+        return False
+
+    # No token configured and no session — unauthenticated.
+    return False
+
+
+_STATIC_EXTS = frozenset({".css", ".js", ".png", ".jpg", ".ico", ".svg", ".woff", ".woff2", ".ttf"})
+
+
 @app.before_request
-def check_token():
-    if not API_TOKEN:
+def require_auth():
+    """Gate every route that is not the login/logout page or a static asset."""
+    public = {"/login", "/logout"}
+    if request.path in public:
         return None
-
-    supplied = request.headers.get("X-Config-Token") or request.args.get("token")
-
-    if not supplied or not hmac.compare_digest(supplied, API_TOKEN):
-        return jsonify({"error": "Unauthorized"}), 401
-
+    # Allow static asset files (CSS, JS, images) through so the login page
+    # itself can load its stylesheet without being redirected.
+    _, ext = os.path.splitext(request.path)
+    if ext.lower() in _STATIC_EXTS:
+        return None
+    if not _is_authenticated():
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Unauthorized"}), 401
+        return redirect(url_for("login"))
     return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        # Use compare_digest to guard against timing-based side-channels.
+        if (
+            hmac.compare_digest(username, ADMIN_USERNAME)
+            and hmac.compare_digest(password, ADMIN_PASSWORD)
+        ):
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+        # Bad credentials — return the login page with HTTP 401 so the
+        # client-side JS can detect the failure and show an error message.
+        response = send_from_directory(STATIC_DIR, "login.html")
+        response.status_code = 401
+        return response
+    return send_from_directory(STATIC_DIR, "login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @app.route("/")
@@ -66,8 +144,6 @@ def update_config():
 
 @app.route("/api/config/reset", methods=["POST"])
 def reset_config():
-    import copy
-
     saved = cfgmod.save_config(copy.deepcopy(cfgmod.DEFAULT_CONFIG))
 
     return jsonify(saved)
@@ -83,6 +159,11 @@ def get_fonts():
 @app.route("/api/screens", methods=["GET"])
 def get_screens():
     return jsonify({"screens": cfgmod.AVAILABLE_SCREENS})
+
+
+@app.route("/api/themes", methods=["GET"])
+def get_themes():
+    return jsonify({"themes": cfgmod.BUILTIN_THEMES})
 
 
 if __name__ == "__main__":

@@ -31,16 +31,41 @@ FONT_SEARCH_DIRS = [
 # All screens the dashboard knows how to render. "id" is the stable
 # identifier stored in config.json / used by the renderer lookup table.
 AVAILABLE_SCREENS = [
-    {"id": "clock", "label": "Clock & Weather"},
-    {"id": "system", "label": "System Status"},
+    {"id": "clock",   "label": "Clock & Weather"},
+    {"id": "system",  "label": "System Status"},
+    {"id": "network", "label": "Network Info"},
+    {"id": "stats",   "label": "CPU Stats & Processes"},
 ]
 
 VALID_ALIGNMENTS = ("left", "center", "right")
+VALID_ORIENTATIONS = ("normal", "flipped", "left", "right")
+VALID_WEATHER_MODES = ("auto", "manual")
+
+# Built-in named themes exposed via the /api/themes endpoint so the
+# web UI can offer one-click apply without hard-coding them there.
+BUILTIN_THEMES = [
+    {"name": "Classic (B/W)",    "background": "#000000", "foreground": "#FFFFFF", "text_secondary": "#AAAAAA"},
+    {"name": "Classic Green",    "background": "#000000", "foreground": "#00FF66", "text_secondary": "#007733"},
+    {"name": "Amber Terminal",   "background": "#0A0A0A", "foreground": "#FFB000", "text_secondary": "#7A5500"},
+    {"name": "Ocean Blue",       "background": "#0A1128", "foreground": "#E8F1FF", "text_secondary": "#6FA8DC"},
+    {"name": "Sunset Orange",    "background": "#1A0B1F", "foreground": "#FFB37B", "text_secondary": "#994400"},
+    {"name": "Monochrome",       "background": "#181818", "foreground": "#E0E0E0", "text_secondary": "#808080"},
+]
 
 DEFAULT_CONFIG = {
     "theme": {
         "background": "#000000",
         "foreground": "#FFFFFF",
+        # Secondary / accent color used for labels and minor decorations.
+        "text_secondary": "#AAAAAA",
+    },
+    "display": {
+        # Screen rotation: "normal" (0°), "flipped" (180°),
+        # "left" (90° CCW), "right" (90° CW).
+        "orientation": "normal",
+        # Backlight brightness 0-100 (best-effort; requires a sysfs
+        # backlight device; silently ignored when none is present).
+        "brightness": 100,
     },
     "fonts": {
         # "family" is a display name that maps to a discovered font (see
@@ -58,18 +83,45 @@ DEFAULT_CONFIG = {
     "alignment": {
         "clock": "center",
         "date": "center",
+        # Alignment for data value labels (e.g. CPU %, temperature …).
+        "values": "left",
+        # Alignment for footer hint lines shown at the bottom of each screen.
+        "footer": "center",
     },
     "timing": {
         "fps": 15,
         "screen_duration": 5.0,
         "transitions_enabled": True,
         "transition_duration": 0.45,
+        # When False the icons are "frozen" (no spin/pulse/bob animations).
+        "icon_animations_enabled": True,
+    },
+    "weather": {
+        # "auto"   – geolocate via ipwho.is (existing behaviour).
+        # "manual" – use the latitude/longitude fields below directly,
+        #            skipping the IP geolocation call entirely.
+        "mode": "auto",
+        "latitude": None,
+        "longitude": None,
     },
     # Only screens present here (and enabled) are shown, in this order.
+    # footer_text / footer_enabled are per-screen overrides; defaults
+    # preserve the original hard-coded strings so old configs are unaffected.
     "screens": [
-        {"id": "clock", "enabled": True},
-        {"id": "system", "enabled": True},
+        {"id": "clock",   "enabled": True,  "footer_text": "SYSTEM STATUS NEXT",  "footer_enabled": True},
+        {"id": "system",  "enabled": True,  "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "network", "enabled": False, "footer_text": "SYSTEM STATUS NEXT",   "footer_enabled": True},
+        {"id": "stats",   "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
     ],
+}
+
+# Default footer text per screen id (used when adding a previously-
+# unknown screen to the sanitised list for the first time).
+_DEFAULT_FOOTER = {
+    "clock":   "SYSTEM STATUS NEXT",
+    "system":  "CLOCK & WEATHER NEXT",
+    "network": "SYSTEM STATUS NEXT",
+    "stats":   "CLOCK & WEATHER NEXT",
 }
 
 
@@ -109,7 +161,7 @@ def _sanitize(cfg):
             fonts[key] = DEFAULT_CONFIG["fonts"][key]
 
     align = cfg.setdefault("alignment", {})
-    for key in ("clock", "date"):
+    for key in ("clock", "date", "values", "footer"):
         if align.get(key) not in VALID_ALIGNMENTS:
             align[key] = DEFAULT_CONFIG["alignment"][key]
 
@@ -137,12 +189,38 @@ def _sanitize(cfg):
         timing.get("transitions_enabled", DEFAULT_CONFIG["timing"]["transitions_enabled"])
     )
 
+    timing["icon_animations_enabled"] = bool(
+        timing.get("icon_animations_enabled", DEFAULT_CONFIG["timing"]["icon_animations_enabled"])
+    )
+
     theme = cfg.setdefault("theme", {})
-    for key in ("background", "foreground"):
+    for key in ("background", "foreground", "text_secondary"):
         value = theme.get(key)
         if not isinstance(value, str) or not _is_hex_color(value):
             theme[key] = DEFAULT_CONFIG["theme"][key]
 
+    # ---- display (orientation + brightness) ----
+    display = cfg.setdefault("display", {})
+    if display.get("orientation") not in VALID_ORIENTATIONS:
+        display["orientation"] = DEFAULT_CONFIG["display"]["orientation"]
+    try:
+        display["brightness"] = max(0, min(100, int(display.get("brightness", DEFAULT_CONFIG["display"]["brightness"]))))
+    except (TypeError, ValueError):
+        display["brightness"] = DEFAULT_CONFIG["display"]["brightness"]
+
+    # ---- weather ----
+    weather = cfg.setdefault("weather", {})
+    if weather.get("mode") not in VALID_WEATHER_MODES:
+        weather["mode"] = DEFAULT_CONFIG["weather"]["mode"]
+    for coord in ("latitude", "longitude"):
+        val = weather.get(coord)
+        if val is not None:
+            try:
+                weather[coord] = float(val)
+            except (TypeError, ValueError):
+                weather[coord] = None
+
+    # ---- screens ----
     valid_ids = {s["id"] for s in AVAILABLE_SCREENS}
     screens = cfg.get("screens")
 
@@ -162,13 +240,33 @@ def _sanitize(cfg):
                 continue
 
             seen.add(sid)
-            cleaned.append({"id": sid, "enabled": bool(entry.get("enabled", True))})
+
+            # Preserve / default footer settings.
+            footer_text = entry.get("footer_text")
+            if not isinstance(footer_text, str):
+                footer_text = _DEFAULT_FOOTER.get(sid, "")
+
+            cleaned.append({
+                "id": sid,
+                "enabled": bool(entry.get("enabled", True)),
+                "footer_text": footer_text,
+                "footer_enabled": bool(entry.get("footer_enabled", True)),
+            })
 
         # Any known screen missing from the list is appended (disabled),
         # so newly added screen types show up for the user to enable.
         for screen in AVAILABLE_SCREENS:
             if screen["id"] not in seen:
-                cleaned.append({"id": screen["id"], "enabled": False})
+                default_entry = next(
+                    (s for s in DEFAULT_CONFIG["screens"] if s["id"] == screen["id"]),
+                    None,
+                )
+                cleaned.append({
+                    "id": screen["id"],
+                    "enabled": default_entry["enabled"] if default_entry else False,
+                    "footer_text": _DEFAULT_FOOTER.get(screen["id"], ""),
+                    "footer_enabled": True,
+                })
 
         screens = cleaned or copy.deepcopy(DEFAULT_CONFIG["screens"])
 
