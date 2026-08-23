@@ -1,0 +1,14 @@
+[Unit]
+Description=RPi5 MHS Dashboard Web Configuration UI
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/RPi5_MHS
+ExecStart=/usr/bin/python3 /home/pi/RPi5_MHS/web_config.py
+Restart=on-failure
+RestartSec=2
+User=pi
+
+[Install]
+WantedBy=multi-user.target
