@@ -1,0 +1,11 @@
+[0;1;32m●[0m mhs35-dashboard.service - MHS35 Information Dashboard
+     Loaded: loaded (]8;;file://RPi5/etc/systemd/system/mhs35-dashboard.service\/etc/systemd/system/mhs35-dashboard.service]8;;\; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Sun 2026-08-23 19:29:20 +04; 20ms ago
+ Invocation: 662c4f67a98845ca85081cf8f938ea67
+   Main PID: 2941 (python3)
+      Tasks: 1[0;38:5:245m (limit: 4810)[0m
+        CPU: 17ms
+     CGroup: /system.slice/mhs35-dashboard.service
+             └─[0;38:5:245m2941 /usr/bin/python3 /root/RPi5_MHS/dashboard.py[0m
+
+Aug 23 19:29:20 RPi5 systemd[1]: Started mhs35-dashboard.service - MHS35 Information Dashboard.
