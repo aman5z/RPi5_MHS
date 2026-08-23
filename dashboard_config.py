@@ -31,15 +31,20 @@ FONT_SEARCH_DIRS = [
 # All screens the dashboard knows how to render. "id" is the stable
 # identifier stored in config.json / used by the renderer lookup table.
 AVAILABLE_SCREENS = [
-    {"id": "clock",   "label": "Clock & Weather"},
-    {"id": "system",  "label": "System Status"},
-    {"id": "network", "label": "Network Info"},
-    {"id": "stats",   "label": "CPU Stats & Processes"},
+    {"id": "clock",         "label": "Clock & Weather"},
+    {"id": "system",        "label": "System Status"},
+    {"id": "network",       "label": "Network Info"},
+    {"id": "stats",         "label": "CPU Stats & Processes"},
+    {"id": "devices",       "label": "Remote Devices"},
+    {"id": "ping",          "label": "Ping / Latency Graph"},
+    {"id": "alerts",        "label": "Alerts"},
+    {"id": "notifications", "label": "Notifications"},
 ]
 
 VALID_ALIGNMENTS = ("left", "center", "right")
 VALID_ORIENTATIONS = ("normal", "flipped", "left", "right")
 VALID_WEATHER_MODES = ("auto", "manual")
+VALID_LOCATION_MODES = ("auto", "manual", "disabled")
 
 # Built-in named themes exposed via the /api/themes endpoint so the
 # web UI can offer one-click apply without hard-coding them there.
@@ -58,6 +63,9 @@ DEFAULT_CONFIG = {
         "foreground": "#FFFFFF",
         # Secondary / accent color used for labels and minor decorations.
         "text_secondary": "#AAAAAA",
+        # Alert / warning accent colors used on the alerts screen.
+        "alert_color": "#FF3333",
+        "warn_color":  "#FFAA00",
     },
     "display": {
         # Screen rotation: "normal" (0°), "flipped" (180°),
@@ -104,24 +112,67 @@ DEFAULT_CONFIG = {
         "latitude": None,
         "longitude": None,
     },
+    # Location shown on the clock screen footer.
+    # mode: "auto" = reverse-geocode from weather lat/lon via Nominatim,
+    #        "manual" = use the "name" string below,
+    #        "disabled" = fall back to the screen's footer_text.
+    "location": {
+        "mode": "auto",
+        "name": "",
+    },
+    # Ping latency graph targets. Each entry: {"label": str, "host": str}.
+    "ping_targets": [
+        {"label": "Router",  "host": "192.168.1.1"},
+        {"label": "1.1.1.1", "host": "1.1.1.1"},
+    ],
+    # Proxmox backup-status integration.
+    "proxmox": {
+        "enabled": False,
+        "host": "",
+        "token_id": "",
+        "token_secret": "",
+        "verify_ssl": True,
+        # Warn if the most recent backup is older than this many hours.
+        "staleness_hours": 24,
+    },
+    # Alert thresholds for local system metrics.
+    "alerts": {
+        "cpu_warn_pct":  85,
+        "temp_warn_c":   75,
+        "disk_warn_pct": 90,
+        # Seconds without a report before a remote device is considered offline.
+        "device_offline_s": 90,
+    },
+    # Notification inbox – keep last N notifications in memory + file.
+    "notifications": {
+        "max_count": 100,
+    },
     # Only screens present here (and enabled) are shown, in this order.
     # footer_text / footer_enabled are per-screen overrides; defaults
     # preserve the original hard-coded strings so old configs are unaffected.
     "screens": [
-        {"id": "clock",   "enabled": True,  "footer_text": "SYSTEM STATUS NEXT",  "footer_enabled": True},
-        {"id": "system",  "enabled": True,  "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
-        {"id": "network", "enabled": False, "footer_text": "SYSTEM STATUS NEXT",   "footer_enabled": True},
-        {"id": "stats",   "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "clock",         "enabled": True,  "footer_text": "SYSTEM STATUS NEXT",   "footer_enabled": True},
+        {"id": "system",        "enabled": True,  "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "network",       "enabled": False, "footer_text": "SYSTEM STATUS NEXT",   "footer_enabled": True},
+        {"id": "stats",         "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "devices",       "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "ping",          "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "alerts",        "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
+        {"id": "notifications", "enabled": False, "footer_text": "CLOCK & WEATHER NEXT", "footer_enabled": True},
     ],
 }
 
 # Default footer text per screen id (used when adding a previously-
 # unknown screen to the sanitised list for the first time).
 _DEFAULT_FOOTER = {
-    "clock":   "SYSTEM STATUS NEXT",
-    "system":  "CLOCK & WEATHER NEXT",
-    "network": "SYSTEM STATUS NEXT",
-    "stats":   "CLOCK & WEATHER NEXT",
+    "clock":         "SYSTEM STATUS NEXT",
+    "system":        "CLOCK & WEATHER NEXT",
+    "network":       "SYSTEM STATUS NEXT",
+    "stats":         "CLOCK & WEATHER NEXT",
+    "devices":       "CLOCK & WEATHER NEXT",
+    "ping":          "CLOCK & WEATHER NEXT",
+    "alerts":        "CLOCK & WEATHER NEXT",
+    "notifications": "CLOCK & WEATHER NEXT",
 }
 
 
@@ -194,7 +245,7 @@ def _sanitize(cfg):
     )
 
     theme = cfg.setdefault("theme", {})
-    for key in ("background", "foreground", "text_secondary"):
+    for key in ("background", "foreground", "text_secondary", "alert_color", "warn_color"):
         value = theme.get(key)
         if not isinstance(value, str) or not _is_hex_color(value):
             theme[key] = DEFAULT_CONFIG["theme"][key]
@@ -219,6 +270,58 @@ def _sanitize(cfg):
                 weather[coord] = float(val)
             except (TypeError, ValueError):
                 weather[coord] = None
+
+    # ---- location ----
+    location = cfg.setdefault("location", {})
+    if location.get("mode") not in VALID_LOCATION_MODES:
+        location["mode"] = DEFAULT_CONFIG["location"]["mode"]
+    if not isinstance(location.get("name"), str):
+        location["name"] = DEFAULT_CONFIG["location"]["name"]
+
+    # ---- ping_targets ----
+    pt = cfg.get("ping_targets")
+    if not isinstance(pt, list):
+        cfg["ping_targets"] = copy.deepcopy(DEFAULT_CONFIG["ping_targets"])
+    else:
+        cleaned_pt = []
+        for entry in pt:
+            if isinstance(entry, dict) and isinstance(entry.get("host"), str) and entry["host"]:
+                cleaned_pt.append({
+                    "label": str(entry.get("label", entry["host"]))[:20],
+                    "host":  str(entry["host"])[:64],
+                })
+        cfg["ping_targets"] = cleaned_pt
+
+    # ---- proxmox ----
+    prx = cfg.setdefault("proxmox", {})
+    prx.setdefault("enabled",         DEFAULT_CONFIG["proxmox"]["enabled"])
+    prx.setdefault("host",            DEFAULT_CONFIG["proxmox"]["host"])
+    prx.setdefault("token_id",        DEFAULT_CONFIG["proxmox"]["token_id"])
+    prx.setdefault("token_secret",    DEFAULT_CONFIG["proxmox"]["token_secret"])
+    prx["verify_ssl"] = bool(prx.get("verify_ssl", DEFAULT_CONFIG["proxmox"]["verify_ssl"]))
+    try:
+        prx["staleness_hours"] = max(1, int(prx.get("staleness_hours", DEFAULT_CONFIG["proxmox"]["staleness_hours"])))
+    except (TypeError, ValueError):
+        prx["staleness_hours"] = DEFAULT_CONFIG["proxmox"]["staleness_hours"]
+
+    # ---- alerts thresholds ----
+    alt = cfg.setdefault("alerts", {})
+    def _int_clamp(val, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(val)))
+        except (TypeError, ValueError):
+            return default
+    alt["cpu_warn_pct"]   = _int_clamp(alt.get("cpu_warn_pct"),   DEFAULT_CONFIG["alerts"]["cpu_warn_pct"],   1, 100)
+    alt["temp_warn_c"]    = _int_clamp(alt.get("temp_warn_c"),    DEFAULT_CONFIG["alerts"]["temp_warn_c"],    1, 150)
+    alt["disk_warn_pct"]  = _int_clamp(alt.get("disk_warn_pct"),  DEFAULT_CONFIG["alerts"]["disk_warn_pct"],  1, 100)
+    alt["device_offline_s"] = _int_clamp(alt.get("device_offline_s"), DEFAULT_CONFIG["alerts"]["device_offline_s"], 10, 3600)
+
+    # ---- notifications ----
+    notif = cfg.setdefault("notifications", {})
+    try:
+        notif["max_count"] = max(1, min(10000, int(notif.get("max_count", DEFAULT_CONFIG["notifications"]["max_count"]))))
+    except (TypeError, ValueError):
+        notif["max_count"] = DEFAULT_CONFIG["notifications"]["max_count"]
 
     # ---- screens ----
     valid_ids = {s["id"] for s in AVAILABLE_SCREENS}

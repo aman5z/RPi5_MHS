@@ -1,0 +1,12 @@
+[Unit]
+Description=MHS Dashboard device stats reporter (runs every 30 s)
+Requires=network-online.target
+After=network-online.target
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

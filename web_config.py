@@ -10,8 +10,10 @@ Then browse to http://<pi-ip>:8080/ from any device on the network.
 """
 
 import copy
+import json
 import os
 import secrets
+import time
 
 from flask import (
     Flask, jsonify, redirect,
@@ -20,9 +22,13 @@ from flask import (
 import hmac
 
 import dashboard_config as cfgmod
+import tailscale_status
+import proxmox_status
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
+NOTIFICATIONS_FILE = os.path.join(BASE_DIR, "notifications.json")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
@@ -47,6 +53,70 @@ ADMIN_PASSWORD = os.environ.get("MHS_ADMIN_PASSWORD", "06112024") # Change for p
 # unset by default since this is meant for a trusted home LAN, but
 # recommended if the Pi is reachable beyond your own network.
 API_TOKEN = os.environ.get("MHS_CONFIG_TOKEN")
+
+# ---------------------------------------------------------------------------
+# In-memory state shared with dashboard.py when running in the same process.
+# ---------------------------------------------------------------------------
+
+# Dict[device_id -> report_dict]: latest stats from each remote device.
+# Persisted to devices.json so last-known state survives restarts.
+_devices: dict = {}
+
+# List (most-recent first) of received notifications.
+_notifications: list = []
+
+
+def _load_devices():
+    """Populate _devices from devices.json on startup."""
+    global _devices
+    try:
+        with open(DEVICES_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _devices = data
+    except (FileNotFoundError, json.JSONDecodeError):
+        _devices = {}
+
+
+def _save_devices():
+    tmp = DEVICES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(_devices, f, indent=2)
+    os.replace(tmp, DEVICES_FILE)
+
+
+def _load_notifications():
+    """Populate _notifications from notifications.json on startup."""
+    global _notifications
+    try:
+        with open(NOTIFICATIONS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            _notifications = data
+    except (FileNotFoundError, json.JSONDecodeError):
+        _notifications = []
+
+
+def _save_notifications():
+    tmp = NOTIFICATIONS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(_notifications, f, indent=2)
+    os.replace(tmp, NOTIFICATIONS_FILE)
+
+
+# Load persisted state at import time (i.e. at server startup).
+_load_devices()
+_load_notifications()
+
+# Wire the shared stores into dashboard.py if it is loaded in the same
+# process (e.g. when running both together under a process supervisor
+# or in tests).  Fails silently when dashboard.py is absent.
+try:
+    import dashboard as _dash
+    _dash.set_devices_store(_devices)
+    _dash.set_notifications_store(_notifications)
+except ImportError:
+    pass
 
 
 def _is_authenticated():
@@ -87,6 +157,8 @@ def require_auth():
     _, ext = os.path.splitext(request.path)
     if ext.lower() in _STATIC_EXTS:
         return None
+    # /api/devices/report is the only write endpoint that device agents call
+    # without a browser session; it uses the same token-bypass auth below.
     if not _is_authenticated():
         if request.path.startswith("/api/"):
             return jsonify({"error": "Unauthorized"}), 401
@@ -166,5 +238,145 @@ def get_themes():
     return jsonify({"themes": cfgmod.BUILTIN_THEMES})
 
 
+# ---------------------------------------------------------------------------
+# Remote device reporting
+# ---------------------------------------------------------------------------
+
+@app.route("/api/devices/report", methods=["POST"])
+def device_report():
+    """Accept a stats report from a remote device agent.
+
+    Expected JSON body::
+
+        {
+            "device_id": "proxmox-01",
+            "name": "Proxmox Host",
+            "type": "linux",
+            "cpu": 12.4,
+            "ram_used": 4.2,
+            "ram_total": 16,
+            "disk_used": 120,
+            "disk_total": 500,
+            "uptime_s": 123456,
+            "timestamp": 1234567890
+        }
+
+    ``last_seen`` is set server-side on receipt.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object required"}), 400
+
+    device_id = str(body.get("device_id") or "").strip()
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+
+    body["last_seen"] = time.time()
+    _devices[device_id] = body
+
+    try:
+        _save_devices()
+    except Exception:
+        pass  # Non-fatal; in-memory state is still updated.
+
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/devices", methods=["GET"])
+def get_devices():
+    """Return all known devices with a computed ``online`` field."""
+    cfg = cfgmod.load_config()
+    threshold = cfg.get("alerts", {}).get("device_offline_s", 90)
+    now = time.time()
+
+    result = []
+    for dev in _devices.values():
+        d = dict(dev)
+        d["online"] = (now - d.get("last_seen", 0)) < threshold
+        result.append(d)
+
+    return jsonify({"devices": result})
+
+
+# ---------------------------------------------------------------------------
+# Tailscale status
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tailscale", methods=["GET"])
+def get_tailscale():
+    """Return Tailscale peer list from the local ``tailscale`` CLI."""
+    return jsonify(tailscale_status.get_status())
+
+
+# ---------------------------------------------------------------------------
+# Proxmox backup status
+# ---------------------------------------------------------------------------
+
+@app.route("/api/proxmox/backups", methods=["GET"])
+def get_proxmox_backups():
+    """Return Proxmox backup task history."""
+    cfg = cfgmod.load_config()
+    prx_cfg = cfg.get("proxmox", {})
+    return jsonify(proxmox_status.get_backups(prx_cfg, force=True))
+
+
+# ---------------------------------------------------------------------------
+# Notifications inbox
+# ---------------------------------------------------------------------------
+
+@app.route("/api/notifications", methods=["GET"])
+def get_notifications():
+    """Return stored notifications, most recent first."""
+    return jsonify({"notifications": _notifications})
+
+
+@app.route("/api/notifications", methods=["POST"])
+def post_notification():
+    """Accept a notification from a companion app.
+
+    Expected JSON body::
+
+        {
+            "device_id": "my-phone",
+            "title": "WhatsApp",
+            "body": "Hey, are you there?",
+            "app": "com.whatsapp",   // optional
+            "timestamp": 1234567890  // optional; server uses now() if absent
+        }
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object required"}), 400
+
+    body.setdefault("timestamp", int(time.time()))
+    body.setdefault("received_at", time.time())
+
+    cfg = cfgmod.load_config()
+    max_count = cfg.get("notifications", {}).get("max_count", 100)
+
+    _notifications.insert(0, body)
+    # Evict oldest beyond cap
+    del _notifications[max_count:]
+
+    try:
+        _save_notifications()
+    except Exception:
+        pass
+
+    return jsonify({"ok": True}), 200
+
+
+@app.route("/api/notifications/clear", methods=["POST"])
+def clear_notifications():
+    """Wipe all stored notifications."""
+    _notifications.clear()
+    try:
+        _save_notifications()
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
+

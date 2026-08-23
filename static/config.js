@@ -162,6 +162,8 @@ function applyConfigToForm(cfg) {
   document.getElementById("theme-background").value = cfg.theme.background;
   document.getElementById("theme-foreground").value = cfg.theme.foreground;
   document.getElementById("theme-text_secondary").value = cfg.theme.text_secondary || "#AAAAAA";
+  document.getElementById("theme-alert_color").value = (cfg.theme && cfg.theme.alert_color) || "#FF3333";
+  document.getElementById("theme-warn_color").value = (cfg.theme && cfg.theme.warn_color) || "#FFAA00";
 
   // Display
   const disp = cfg.display || {};
@@ -198,6 +200,35 @@ function applyConfigToForm(cfg) {
   document.getElementById("weather-longitude").value = wx.longitude !== null && wx.longitude !== undefined ? wx.longitude : "";
   toggleWeatherManualFields(wx.mode || "auto");
 
+  // Location
+  const loc = cfg.location || {};
+  document.getElementById("location-mode").value = loc.mode || "auto";
+  document.getElementById("location-name").value = loc.name || "";
+  toggleLocationManualFields(loc.mode || "auto");
+
+  // Ping targets
+  renderPingList(cfg.ping_targets || []);
+
+  // Proxmox
+  const prx = cfg.proxmox || {};
+  document.getElementById("proxmox-enabled").checked = !!prx.enabled;
+  document.getElementById("proxmox-host").value = prx.host || "";
+  document.getElementById("proxmox-token_id").value = prx.token_id || "";
+  document.getElementById("proxmox-token_secret").value = prx.token_secret || "";
+  document.getElementById("proxmox-staleness_hours").value = prx.staleness_hours !== undefined ? prx.staleness_hours : 24;
+  document.getElementById("proxmox-verify_ssl").checked = prx.verify_ssl !== false;
+
+  // Alerts
+  const alt = cfg.alerts || {};
+  document.getElementById("alerts-cpu_warn_pct").value = alt.cpu_warn_pct !== undefined ? alt.cpu_warn_pct : 85;
+  document.getElementById("alerts-temp_warn_c").value = alt.temp_warn_c !== undefined ? alt.temp_warn_c : 75;
+  document.getElementById("alerts-disk_warn_pct").value = alt.disk_warn_pct !== undefined ? alt.disk_warn_pct : 90;
+  document.getElementById("alerts-device_offline_s").value = alt.device_offline_s !== undefined ? alt.device_offline_s : 90;
+
+  // Notifications
+  const notif = cfg.notifications || {};
+  document.getElementById("notifications-max_count").value = notif.max_count !== undefined ? notif.max_count : 100;
+
   renderScreenList(cfg.screens);
 }
 
@@ -206,48 +237,111 @@ function toggleWeatherManualFields(mode) {
   fields.style.display = mode === "manual" ? "flex" : "none";
 }
 
+function toggleLocationManualFields(mode) {
+  const fields = document.getElementById("location-manual-fields");
+  fields.style.display = mode === "manual" ? "flex" : "none";
+}
+
+// ---------------------------------------------------------------------------
+// Ping targets list editor
+// ---------------------------------------------------------------------------
+
+function renderPingList(targets) {
+  const list = document.getElementById("ping-list");
+  list.innerHTML = "";
+  (targets || []).forEach((tgt, i) => {
+    const li = document.createElement("li");
+    li.className = "screen-item";
+    li.dataset.idx = i;
+    li.innerHTML = `
+      <div class="screen-item-content">
+        <label>Label <input type="text" class="ping-label" value="${(tgt.label || "").replace(/"/g, "&quot;")}" placeholder="Router"></label>
+        <label>Host <input type="text" class="ping-host" value="${(tgt.host || "").replace(/"/g, "&quot;")}" placeholder="192.168.1.1"></label>
+        <button type="button" class="secondary ping-remove-btn" data-idx="${i}">Remove</button>
+      </div>`;
+    list.appendChild(li);
+  });
+  list.querySelectorAll(".ping-remove-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.closest("li").remove();
+    });
+  });
+}
+
+function collectPingTargets() {
+  return [...document.querySelectorAll("#ping-list .screen-item")].map((li) => ({
+    label: li.querySelector(".ping-label").value.trim(),
+    host:  li.querySelector(".ping-host").value.trim(),
+  })).filter((t) => t.host);
+}
+
 function buildConfigFromForm() {
   const wxMode = document.getElementById("weather-mode").value;
   const wxLat = document.getElementById("weather-latitude").value;
   const wxLon = document.getElementById("weather-longitude").value;
+  const locMode = document.getElementById("location-mode").value;
 
   return {
     theme: {
-      background: document.getElementById("theme-background").value,
-      foreground: document.getElementById("theme-foreground").value,
+      background:     document.getElementById("theme-background").value,
+      foreground:     document.getElementById("theme-foreground").value,
       text_secondary: document.getElementById("theme-text_secondary").value,
+      alert_color:    document.getElementById("theme-alert_color").value,
+      warn_color:     document.getElementById("theme-warn_color").value,
     },
     display: {
       orientation: document.getElementById("display-orientation").value,
-      brightness: Number(document.getElementById("display-brightness").value),
+      brightness:  Number(document.getElementById("display-brightness").value),
     },
     fonts: {
-      family: document.getElementById("font-family").value,
-      clock_size: Number(document.getElementById("font-clock_size").value),
-      date_size: Number(document.getElementById("font-date_size").value),
-      value_size: Number(document.getElementById("font-value_size").value),
+      family:         document.getElementById("font-family").value,
+      clock_size:     Number(document.getElementById("font-clock_size").value),
+      date_size:      Number(document.getElementById("font-date_size").value),
+      value_size:     Number(document.getElementById("font-value_size").value),
       big_value_size: Number(document.getElementById("font-big_value_size").value),
-      small_size: Number(document.getElementById("font-small_size").value),
-      ip_size: Number(document.getElementById("font-ip_size").value),
-      title_size: Number(document.getElementById("font-title_size").value),
+      small_size:     Number(document.getElementById("font-small_size").value),
+      ip_size:        Number(document.getElementById("font-ip_size").value),
+      title_size:     Number(document.getElementById("font-title_size").value),
     },
     alignment: {
-      clock: document.getElementById("align-clock").value,
-      date: document.getElementById("align-date").value,
+      clock:  document.getElementById("align-clock").value,
+      date:   document.getElementById("align-date").value,
       values: document.getElementById("align-values").value,
       footer: document.getElementById("align-footer").value,
     },
     timing: {
-      fps: Number(document.getElementById("timing-fps").value),
-      screen_duration: Number(document.getElementById("timing-screen_duration").value),
-      transition_duration: Number(document.getElementById("timing-transition_duration").value),
-      transitions_enabled: document.getElementById("timing-transitions_enabled").checked,
-      icon_animations_enabled: document.getElementById("timing-icon_animations_enabled").checked,
+      fps:                      Number(document.getElementById("timing-fps").value),
+      screen_duration:          Number(document.getElementById("timing-screen_duration").value),
+      transition_duration:      Number(document.getElementById("timing-transition_duration").value),
+      transitions_enabled:      document.getElementById("timing-transitions_enabled").checked,
+      icon_animations_enabled:  document.getElementById("timing-icon_animations_enabled").checked,
     },
     weather: {
-      mode: wxMode,
-      latitude: wxMode === "manual" && wxLat !== "" ? Number(wxLat) : null,
+      mode:      wxMode,
+      latitude:  wxMode === "manual" && wxLat !== "" ? Number(wxLat) : null,
       longitude: wxMode === "manual" && wxLon !== "" ? Number(wxLon) : null,
+    },
+    location: {
+      mode: locMode,
+      name: document.getElementById("location-name").value.trim(),
+    },
+    ping_targets: collectPingTargets(),
+    proxmox: {
+      enabled:         document.getElementById("proxmox-enabled").checked,
+      host:            document.getElementById("proxmox-host").value.trim(),
+      token_id:        document.getElementById("proxmox-token_id").value.trim(),
+      token_secret:    document.getElementById("proxmox-token_secret").value,
+      staleness_hours: Number(document.getElementById("proxmox-staleness_hours").value),
+      verify_ssl:      document.getElementById("proxmox-verify_ssl").checked,
+    },
+    alerts: {
+      cpu_warn_pct:     Number(document.getElementById("alerts-cpu_warn_pct").value),
+      temp_warn_c:      Number(document.getElementById("alerts-temp_warn_c").value),
+      disk_warn_pct:    Number(document.getElementById("alerts-disk_warn_pct").value),
+      device_offline_s: Number(document.getElementById("alerts-device_offline_s").value),
+    },
+    notifications: {
+      max_count: Number(document.getElementById("notifications-max_count").value),
     },
     screens: collectScreens(),
   };
@@ -264,6 +358,22 @@ async function init() {
   // Weather mode toggle.
   document.getElementById("weather-mode").addEventListener("change", (e) => {
     toggleWeatherManualFields(e.target.value);
+  });
+
+  // Location mode toggle.
+  document.getElementById("location-mode").addEventListener("change", (e) => {
+    toggleLocationManualFields(e.target.value);
+  });
+
+  // Ping add button.
+  document.getElementById("ping-add-btn").addEventListener("click", () => {
+    const list = document.getElementById("ping-list");
+    const existing = [...list.querySelectorAll(".screen-item")].map((li) => ({
+      label: li.querySelector(".ping-label").value.trim(),
+      host:  li.querySelector(".ping-host").value.trim(),
+    }));
+    existing.push({ label: "", host: "" });
+    renderPingList(existing);
   });
 
   const [config, fontsData, screensData, themesData] = await Promise.all([
