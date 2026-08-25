@@ -7,6 +7,7 @@ import math
 import json
 import socket
 import threading
+import io
 import subprocess
 import requests
 from datetime import datetime
@@ -209,13 +210,78 @@ _PING_HISTORY_LEN = 40
 # ---------------------------------------------------------
 # Managed by web_config.py in-process; dashboard reads the shared dict.
 # Imported lazily to avoid circular imports.
+
 _devices_store = None  # set by web_config after import
+
+# Persistent layout for the remote Proxmox system-status screen.
+PROXMOX_LAYOUT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "proxmox_layout.json"
+)
+_proxmox_layout_cache = None
+_proxmox_layout_mtime = 0.0
+
+
+def _get_proxmox_layout():
+    """Load the Proxmox screen layout and hot-reload it when changed."""
+    global _proxmox_layout_cache, _proxmox_layout_mtime
+
+    try:
+        mtime = os.path.getmtime(PROXMOX_LAYOUT_FILE)
+
+        if (
+            _proxmox_layout_cache is None
+            or mtime != _proxmox_layout_mtime
+        ):
+            with open(PROXMOX_LAYOUT_FILE) as f:
+                data = json.load(f)
+
+            if isinstance(data, dict) and isinstance(data.get("items"), dict):
+                _proxmox_layout_cache = data
+                _proxmox_layout_mtime = mtime
+
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+    if isinstance(_proxmox_layout_cache, dict):
+        return _proxmox_layout_cache
+
+    return {
+        "version": 2,
+        "canvas": {"width": 480, "height": 320, "safe_margin": 12},
+        "items": {
+            "title": {"x": 16, "y": 14},
+            "clock": {"x": 464, "y": 14},
+            "cpu": {"x": 60, "y": 55},
+            "temp": {"x": 180, "y": 55},
+            "ram": {"x": 300, "y": 55},
+            "disk": {"x": 420, "y": 55},
+            "uptime": {"x": 25, "y": 170},
+            "tailscale": {"x": 258, "y": 170}
+        }
+    }
+
 
 
 def set_devices_store(store):
     """Called by web_config to share the in-memory device store."""
     global _devices_store
     _devices_store = store
+
+
+def _get_devices_store():
+    """Return remote devices from the shared store or persisted devices.json."""
+    if isinstance(_devices_store, dict) and _devices_store:
+        return _devices_store
+
+    try:
+        import json
+        devices_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "devices.json")
+        with open(devices_file) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
 
 
 # ---------------------------------------------------------
@@ -917,6 +983,39 @@ def _apply_orientation(image):
     return image
 
 
+# Latest rendered frame for the web live-preview.
+# The dashboard renderer updates this with the exact same frame sent to fb0.
+_latest_frame = None
+_latest_frame_lock = threading.Lock()
+
+
+def set_latest_frame(image):
+    global _latest_frame
+
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=82, optimize=False)
+    data = buf.getvalue()
+
+    with _latest_frame_lock:
+        _latest_frame = data
+
+    # Shared RAM-backed file so the separate Flask process can serve
+    # the exact same frame. /run is normally tmpfs on Raspberry Pi OS.
+    try:
+        tmp = "/run/mhs-display.jpg.tmp"
+        final = "/run/mhs-display.jpg"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, final)
+    except OSError:
+        pass
+
+
+def get_latest_frame():
+    with _latest_frame_lock:
+        return _latest_frame
+
+
 def write_fb(image):
 
     image = _apply_orientation(image)
@@ -1297,115 +1396,344 @@ def _device_type_label(dtype):
     return {"linux": "[L]", "windows": "[W]", "android": "[A]"}.get(str(dtype).lower(), "[?]")
 
 
+def _fit_font(draw, text, font, max_width, min_size=10):
+    """Return a smaller variant of font when text is too wide."""
+    try:
+        bbox = draw.textbbox((0, 0), str(text), font=font)
+        width = bbox[2] - bbox[0]
+
+        if width <= max_width:
+            return font
+
+        size = getattr(font, "size", 16)
+
+        while size > min_size:
+            size -= 1
+            try:
+                candidate = font.font_variant(size=size)
+                bbox = draw.textbbox((0, 0), str(text), font=candidate)
+                if (bbox[2] - bbox[0]) <= max_width:
+                    return candidate
+            except Exception:
+                break
+
+    except Exception:
+        pass
+
+    return font
+
+
+def _center_text(draw, cx, y, text, font, fill=WHITE, max_width=None):
+    """Draw text horizontally centered at cx."""
+    if max_width:
+        font = _fit_font(draw, text, font, max_width)
+
+    bbox = draw.textbbox((0, 0), str(text), font=font)
+    width = bbox[2] - bbox[0]
+    draw.text((int(cx - width / 2), int(y)), str(text), font=font, fill=fill)
+
+
+def _remote_uptime(seconds):
+    try:
+        seconds = int(float(seconds))
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        minutes = (seconds % 3600) // 60
+
+        if days:
+            return f"{days}d {hours:02d}h"
+
+        return f"{hours:02d}h {minutes:02d}m"
+    except Exception:
+        return "--"
+
+
 def draw_screen_devices(t, sysdata):
-    """Screen 4: Remote device stats + Tailscale peer list + Proxmox backup summary.
-
-    Remote devices are sourced from the shared in-memory store populated by
-    web_config.py's POST /api/devices/report endpoint.
-
-    Proxmox backup status is shown as a compact banner at the bottom of the
-    devices list — it is the natural home since Proxmox is itself a remote
-    device/hypervisor being monitored.
-    """
+    """Screen 4: Proxmox system-status style remote device screen."""
 
     image = Image.new("RGB", (W, H), BLACK)
     draw = ImageDraw.Draw(image)
 
     at = _anim_t(t)
     now = datetime.now()
-    ALERT = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
-    WARN  = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("warn_color",  "#FFAA00"))
 
-    draw.text((16, 14), "REMOTE DEVICES", font=title_font, fill=WHITE)
-    draw.text((W-16-70, 14), now.strftime("%H:%M:%S"), font=title_font, fill=WHITE)
-    draw.line((12, 40, W-12, 40), fill=WHITE, width=1)
+    layout = _get_proxmox_layout()
+    items = layout.get("items", {})
 
-    devices = list((_devices_store or {}).values())
-    offline_threshold = CONFIG.get("alerts", {}).get("device_offline_s", 90)
+    devices = list(_get_devices_store().values())
 
-    if not devices:
-        draw.text((20, 60), "No devices reporting.", font=ip_font, fill=SECONDARY)
-        draw.text((20, 80), "Run agents/linux_report.sh or", font=small_font, fill=SECONDARY)
-        draw.text((20, 95), "agents/windows_report.ps1 on", font=small_font, fill=SECONDARY)
-        draw.text((20, 110), "remote machines.", font=small_font, fill=SECONDARY)
-    else:
-        now_ts = time.time()
-        row_h = 38
-        max_rows = 4
-        for i, dev in enumerate(devices[:max_rows]):
-            y0 = 48 + i * row_h
-            online = (now_ts - dev.get("last_seen", 0)) < offline_threshold
-            status_color = WHITE if online else ALERT
-            type_label = _device_type_label(dev.get("type", ""))
-            name = (dev.get("name") or dev.get("device_id", "?"))[:14]
-            draw.text((12, y0), f"{type_label} {name}", font=small_font, fill=status_color)
-            draw.text((12, y0 + 13), "ON" if online else "OFF",
-                      font=small_font, fill=status_color)
+    # Prefer the device explicitly named "proxmox".
+    dev = None
 
-            cpu_pct  = (dev.get("cpu",  0) or 0) / 100
-            ram_used  = dev.get("ram_used",  0) or 0
-            ram_total = dev.get("ram_total", 1) or 1
-            disk_used  = dev.get("disk_used",  0) or 0
-            disk_total = dev.get("disk_total", 1) or 1
+    for d in devices:
+        if str(d.get("device_id", "")).lower() == "proxmox":
+            dev = d
+            break
 
-            # Mini bar: CPU
-            draw.text((130, y0), "CPU", font=small_font, fill=SECONDARY)
-            _mini_bar(draw, 160, y0 + 2, 70, 10, cpu_pct)
+    if dev is None:
+        for d in devices:
+            if str(d.get("name", "")).lower() == "proxmox":
+                dev = d
+                break
 
-            # Mini bar: RAM
-            draw.text((245, y0), "RAM", font=small_font, fill=SECONDARY)
-            _mini_bar(draw, 275, y0 + 2, 70, 10, ram_used / ram_total)
+    if dev is None and devices:
+        dev = devices[0]
 
-            # Mini bar: Disk
-            draw.text((360, y0), "DSK", font=small_font, fill=SECONDARY)
-            _mini_bar(draw, 388, y0 + 2, 70, 10, disk_used / disk_total)
+    # --------------------------------------------------------
+    # Header
+    # --------------------------------------------------------
 
-            if i < max_rows - 1:
-                draw.line((12, y0 + row_h - 2, W-12, y0 + row_h - 2),
-                          fill=SECONDARY, width=1)
+    title = "PROXMOX STATUS"
 
-        if len(devices) > max_rows:
-            draw.text((12, 48 + max_rows * row_h),
-                      f"+{len(devices)-max_rows} more", font=small_font, fill=SECONDARY)
+    title_pos = items.get("title", {"x": 16, "y": 14})
+    clock_pos = items.get("clock", {"x": 464, "y": 14})
 
-    # ---- Proxmox backup banner ----------------------------------------
-    # Shown at the bottom of this screen; see proxmox_status.py for details.
-    prx_cfg = CONFIG.get("proxmox", {})
-    if prx_cfg.get("enabled"):
-        bk = proxmox_status.get_backups(prx_cfg)
-        draw.line((12, 218, W-12, 218), fill=WHITE, width=1)
-        if bk["available"] and bk["backups"]:
-            b = bk["backups"][0]
-            age_s = bk.get("last_ok_age_s")
-            age_str = ""
-            if age_s is not None:
-                if age_s < 3600:
-                    age_str = f"{int(age_s/60)}m ago"
-                elif age_s < 86400:
-                    age_str = f"{int(age_s/3600)}h ago"
-                else:
-                    age_str = f"{int(age_s/86400)}d ago"
-            status_txt = b.get("status", "?")
-            color = WHITE
-            staleness_h = prx_cfg.get("staleness_hours", 24)
-            if bk["any_failed"] or (age_s is not None and age_s > staleness_h * 3600):
-                color = WARN
-            draw.text((12, 222), "BACKUP", font=small_font, fill=SECONDARY)
-            draw.text((80, 222), f"{status_txt}  {age_str}",
-                      font=small_font, fill=color)
-        else:
-            draw.text((12, 222), "BACKUP", font=small_font, fill=SECONDARY)
-            draw.text((80, 222), bk.get("error") or "No data", font=small_font, fill=SECONDARY)
+    draw.text(
+        (title_pos["x"], title_pos["y"]),
+        title,
+        font=title_font,
+        fill=WHITE
+    )
 
-    draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
+    clock_text = now.strftime("%H:%M:%S")
+    bbox = draw.textbbox((0, 0), clock_text, font=title_font)
+    clock_width = bbox[2] - bbox[0]
+
+    draw.text(
+        (clock_pos["x"] - clock_width, clock_pos["y"]),
+        clock_text,
+        font=title_font,
+        fill=WHITE
+    )
+
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+
+    # --------------------------------------------------------
+    # No data
+    # --------------------------------------------------------
+
+    if not dev:
+        draw.text(
+            (120, 120),
+            "NO DEVICE DATA",
+            font=big_value_font,
+            fill=SECONDARY
+        )
+
+        draw.line((12, 219, W - 12, 219), fill=WHITE, width=1)
+        _draw_footer(draw, "devices", "CLOCK & WEATHER NEXT")
+        return image
+
+    # --------------------------------------------------------
+    # Values
+    # --------------------------------------------------------
+
+    cpu = float(dev.get("cpu", 0) or 0)
+
+    temp_raw = dev.get("temp")
+    try:
+        temp = float(temp_raw) if temp_raw is not None else None
+    except Exception:
+        temp = None
+
+    ram_used = float(dev.get("ram_used", 0) or 0)
+    ram_total = float(dev.get("ram_total", 1) or 1)
+
+    disk_used = float(dev.get("disk_used", 0) or 0)
+    disk_total = float(dev.get("disk_total", 1) or 1)
+
+    uptime = _remote_uptime(dev.get("uptime_s", 0))
+
+    tailscale_ip = str(
+        dev.get("tailscale_ip")
+        or dev.get("ip")
+        or "--"
+    )
+
+    # --------------------------------------------------------
+    # TOP FOUR GROUPS
+    # --------------------------------------------------------
+
+    top = {
+        "cpu": {
+            "label": "CPU",
+            "value": f"{cpu:.0f}%",
+            "pct": cpu / 100,
+            "icon": "cpu"
+        },
+        "temp": {
+            "label": "TEMP",
+            "value": f"{temp:.1f}°C" if temp is not None else "--",
+            "pct": min(max((temp or 0) / 100, 0), 1),
+            "icon": "temp"
+        },
+        "ram": {
+            "label": "RAM",
+            "value": f"{ram_used:.1f}/{ram_total:.0f}GB",
+            "pct": ram_used / ram_total if ram_total else 0,
+            "icon": "ram"
+        },
+        "disk": {
+            "label": "DISK",
+            "value": f"{disk_used:.0f}/{disk_total:.0f}GB",
+            "pct": disk_used / disk_total if disk_total else 0,
+            "icon": "disk"
+        }
+    }
+
+    for key, data in top.items():
+
+        pos = items.get(key, {"x": 60, "y": 55})
+        cx = float(pos.get("x", 60))
+        icon_y = float(pos.get("y", 55))
+
+        # Keep each group inside its 120px column.
+        left = max(18, cx - 55)
+        right = min(W - 18, cx + 55)
+        max_text_width = max(65, right - left)
+
+        if data["icon"] == "cpu":
+            icon_cpu(draw, int(cx - 26), int(icon_y), at, cpu)
+
+        elif data["icon"] == "temp":
+            icon_thermometer(
+                draw,
+                int(cx - 25),
+                int(icon_y),
+                data["pct"]
+            )
+
+        elif data["icon"] == "ram":
+            icon_ram(draw, int(cx - 25), int(icon_y), at)
+
+        elif data["icon"] == "disk":
+            icon_disk(draw, int(cx - 25), int(icon_y), at)
+
+        _center_text(
+            draw,
+            cx,
+            icon_y + 34,
+            data["label"],
+            small_font,
+            SECONDARY,
+            max_text_width
+        )
+
+        _center_text(
+            draw,
+            cx,
+            icon_y + 51,
+            data["value"],
+            value_font,
+            WHITE,
+            max_text_width
+        )
+
+        # Progress bar, always centered under the group.
+        bar_w = 86
+        bar_x = int(cx - bar_w / 2)
+        bar_y = int(icon_y + 82)
+
+        pct = max(0.0, min(1.0, float(data["pct"])))
+
+        draw.rectangle(
+            (bar_x, bar_y, bar_x + bar_w, bar_y + 7),
+            outline=WHITE
+        )
+
+        fill_w = int((bar_w - 4) * pct)
+
+        if fill_w > 0:
+            draw.rectangle(
+                (
+                    bar_x + 2,
+                    bar_y + 2,
+                    bar_x + 2 + fill_w,
+                    bar_y + 4
+                ),
+                fill=WHITE
+            )
+
+    # --------------------------------------------------------
+    # TOP DIVIDERS
+    # --------------------------------------------------------
+
+    # These are deliberately between groups rather than through text.
+    centers = [
+        float(items.get("cpu", {}).get("x", 60)),
+        float(items.get("temp", {}).get("x", 180)),
+        float(items.get("ram", {}).get("x", 300)),
+        float(items.get("disk", {}).get("x", 420))
+    ]
+
+    for a, b in zip(centers[:-1], centers[1:]):
+        x = int((a + b) / 2)
+        draw.line((x, 53, x, 160), fill=WHITE, width=1)
+
+    draw.line((12, 160, W - 12, 160), fill=WHITE, width=1)
+
+    # --------------------------------------------------------
+    # LOWER LEFT - UPTIME
+    # --------------------------------------------------------
+
+    p = items.get("uptime", {"x": 25, "y": 170})
+
+    ux = int(p.get("x", 25))
+    uy = int(p.get("y", 170))
+
+    icon_fan(draw, ux, uy, at, 0)
+
+    draw.text(
+        (ux + 43, uy + 2),
+        "UPTIME",
+        font=small_font,
+        fill=SECONDARY
+    )
+
+    draw.text(
+        (ux + 43, uy + 19),
+        uptime,
+        font=value_font,
+        fill=WHITE
+    )
+
+    # --------------------------------------------------------
+    # LOWER RIGHT - TAILSCALE
+    # --------------------------------------------------------
+
+    p = items.get("tailscale", {"x": 258, "y": 170})
+
+    tx = int(p.get("x", 258))
+    ty = int(p.get("y", 170))
+
+    icon_network(draw, tx, ty, at)
+
+    draw.text(
+        (tx + 46, ty + 2),
+        "TAILSCALE",
+        font=small_font,
+        fill=SECONDARY
+    )
+
+    tailscale_font = _fit_font(
+        draw,
+        tailscale_ip,
+        ip_font,
+        155
+    )
+
+    draw.text(
+        (tx + 46, ty + 19),
+        tailscale_ip,
+        font=tailscale_font,
+        fill=WHITE
+    )
+
+    draw.line((12, 219, W - 12, 219), fill=WHITE, width=1)
+
     _draw_footer(draw, "devices", "CLOCK & WEATHER NEXT")
 
     return image
-
-
-# ---------------------------------------------------------
-# SCREEN 5: PING / LATENCY GRAPH
-# ---------------------------------------------------------
 
 def draw_screen_ping(t, sysdata):
     """Screen 5: Sparkline latency graph per configured ping target."""
@@ -1776,6 +2104,8 @@ def main():
             else:
                 frame = render_screen(current_screen, now, sysdata)
 
+            # Publish the same rendered frame used by the physical display.
+            set_latest_frame(frame)
             write_fb(frame)
 
         except Exception as e:

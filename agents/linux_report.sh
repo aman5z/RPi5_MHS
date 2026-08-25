@@ -71,4 +71,4 @@ if [ -n "$TOKEN" ]; then
     CURL_ARGS+=(-H "X-Config-Token: ${TOKEN}")
 fi
 
-curl "${CURL_ARGS[@]}" "$ENDPOINT" > /dev/null
+curl --fail --connect-timeout 5 --max-time 15 "${CURL_ARGS[@]}" "$ENDPOINT" > /dev/null

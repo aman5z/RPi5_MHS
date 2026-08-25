@@ -16,7 +16,7 @@ import secrets
 import time
 
 from flask import (
-    Flask, jsonify, redirect,
+    Flask, jsonify, redirect, Response,
     request, send_from_directory, session, url_for,
 )
 import hmac
@@ -29,6 +29,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 NOTIFICATIONS_FILE = os.path.join(BASE_DIR, "notifications.json")
+PROXMOX_LAYOUT_FILE = os.path.join(BASE_DIR, "proxmox_layout.json")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
@@ -239,8 +240,119 @@ def get_themes():
 
 
 # ---------------------------------------------------------------------------
+# Live physical display mirror
+# ---------------------------------------------------------------------------
+
+@app.route("/api/display/frame", methods=["GET"])
+def display_frame():
+    """Return the latest exact frame rendered for the physical MHS display."""
+    frame_file = "/run/mhs-display.jpg"
+
+    try:
+        with open(frame_file, "rb") as f:
+            frame = f.read()
+    except (FileNotFoundError, OSError):
+        return Response(status=503)
+
+    if not frame:
+        return Response(status=503)
+
+    return Response(
+        frame,
+        mimetype="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Remote device reporting
 # ---------------------------------------------------------------------------
+
+
+
+@app.route("/api/proxmox-layout", methods=["GET"])
+def get_proxmox_layout():
+    """Return the editable Proxmox display layout."""
+    try:
+        with open(PROXMOX_LAYOUT_FILE) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid layout")
+        return jsonify(data)
+    except Exception:
+        return jsonify({
+            "version": 2,
+            "canvas": {
+                "width": 480,
+                "height": 320,
+                "safe_margin": 12
+            },
+            "items": {}
+        })
+
+
+@app.route("/api/proxmox-layout", methods=["POST"])
+def save_proxmox_layout():
+    """Save the editable Proxmox display layout."""
+    body = request.get_json(silent=True)
+
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object required"}), 400
+
+    items = body.get("items")
+
+    if not isinstance(items, dict):
+        return jsonify({"error": "items object required"}), 400
+
+    clean = {
+        "version": 2,
+        "canvas": {
+            "width": 480,
+            "height": 320,
+            "safe_margin": 12
+        },
+        "items": {}
+    }
+
+    allowed = {
+        "title", "clock",
+        "cpu", "temp", "ram", "disk",
+        "uptime", "tailscale"
+    }
+
+    for name in allowed:
+        if name not in items:
+            continue
+
+        item = items[name]
+
+        try:
+            x = max(0, min(480, float(item.get("x", 0))))
+            y = max(0, min(320, float(item.get("y", 0))))
+        except Exception:
+            continue
+
+        clean["items"][name] = {
+            "x": round(x, 2),
+            "y": round(y, 2)
+        }
+
+    tmp = PROXMOX_LAYOUT_FILE + ".tmp"
+
+    with open(tmp, "w") as f:
+        json.dump(clean, f, indent=2)
+        f.write("\\n")
+
+    os.replace(tmp, PROXMOX_LAYOUT_FILE)
+
+    return jsonify({
+        "ok": True,
+        "layout": clean
+    })
+
 
 @app.route("/api/devices/report", methods=["POST"])
 def device_report():

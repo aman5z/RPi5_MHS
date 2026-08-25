@@ -14,6 +14,19 @@
 </header>
 
 <main>
+  <!-- LIVE PHYSICAL DISPLAY MIRROR -->
+  <section class="card" id="live-display-card">
+    <h2>Live Display</h2>
+    <p class="hint">Live mirror of the exact 480×320 frame shown on the physical MHS display.</p>
+    <div style="display:flex;justify-content:center;align-items:center;background:#000;border-radius:10px;padding:12px;overflow:hidden;">
+      <img id="live-display"
+           src="/api/display/frame"
+           alt="Live MHS display"
+           style="display:block;width:min(100%,720px);height:auto;image-rendering:auto;background:#000;border-radius:4px;">
+    </div>
+    <p id="live-display-status" class="hint" style="text-align:center;margin-bottom:0;">Connecting…</p>
+  </section>
+
   <div id="status" class="status" hidden></div>
 
   <!-- THEME -->
@@ -259,5 +272,585 @@
 </main>
 
 <script src="config.js"></script>
+<script>
+(() => {
+  const img = document.getElementById("live-display");
+  const status = document.getElementById("live-display-status");
+
+  if (!img) return;
+
+  function refreshFrame() {
+    const next = new Image();
+
+    next.onload = () => {
+      img.src = next.src;
+      status.textContent = "LIVE";
+      status.style.opacity = "1";
+    };
+
+    next.onerror = () => {
+      status.textContent = "Waiting for dashboard frame…";
+    };
+
+    next.src = "/api/display/frame?t=" + Date.now();
+  }
+
+  refreshFrame();
+  setInterval(refreshFrame, 250);
+})();
+</script>
+
+<section id="mhs-proxmox-layout-editor" style="
+margin-top:28px;
+padding:20px;
+border:1px solid #333;
+border-radius:14px;
+background:#17191d;
+color:#eee;
+">
+  <h2 style="margin:0 0 6px;">Proxmox Display Layout</h2>
+
+  <p style="margin:0 0 16px;color:#9aa4b2;">
+    Drag the display groups to correct alignment. This controls the actual
+    480×320 MHS display.
+  </p>
+
+  <div style="
+    display:flex;
+    gap:20px;
+    flex-wrap:wrap;
+    align-items:flex-start;
+  ">
+
+    <div>
+      <div id="mhs-layout-canvas" style="
+        position:relative;
+        width:480px;
+        height:320px;
+        background:#000;
+        border:2px solid #555;
+        border-radius:8px;
+        overflow:hidden;
+        user-select:none;
+        touch-action:none;
+        background-size:100% 100%;
+      ">
+        <img id="mhs-layout-live" style="
+          position:absolute;
+          inset:0;
+          width:480px;
+          height:320px;
+          object-fit:fill;
+          pointer-events:none;
+        ">
+
+        <div id="mhs-layout-grid" style="
+          position:absolute;
+          inset:0;
+          pointer-events:none;
+          background-image:
+            linear-gradient(rgba(255,255,255,.06) 1px,transparent 1px),
+            linear-gradient(90deg,rgba(255,255,255,.06) 1px,transparent 1px);
+          background-size:20px 20px;
+        "></div>
+      </div>
+
+      <div style="
+        margin-top:8px;
+        font-size:12px;
+        color:#777;
+      ">
+        480 × 320 px · drag a group · green outline = selected
+      </div>
+    </div>
+
+    <div style="
+      min-width:260px;
+      max-width:330px;
+      flex:1;
+    ">
+
+      <label style="display:block;margin-bottom:6px;">
+        Element
+      </label>
+
+      <select id="mhs-layout-select" style="
+        width:100%;
+        padding:9px;
+        background:#0e1013;
+        color:#fff;
+        border:1px solid #444;
+        border-radius:7px;
+      ">
+      </select>
+
+      <div style="
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:10px;
+        margin-top:12px;
+      ">
+        <label>
+          X
+          <input id="mhs-layout-x" type="number" step="1" style="
+            width:100%;
+            box-sizing:border-box;
+            padding:8px;
+            background:#0e1013;
+            color:#fff;
+            border:1px solid #444;
+            border-radius:6px;
+          ">
+        </label>
+
+        <label>
+          Y
+          <input id="mhs-layout-y" type="number" step="1" style="
+            width:100%;
+            box-sizing:border-box;
+            padding:8px;
+            background:#0e1013;
+            color:#fff;
+            border:1px solid #444;
+            border-radius:6px;
+          ">
+        </label>
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:1fr 1fr;
+        gap:8px;
+        margin-top:14px;
+      ">
+        <button id="mhs-layout-up">▲</button>
+        <button id="mhs-layout-down">▼</button>
+        <button id="mhs-layout-left">◀</button>
+        <button id="mhs-layout-right">▶</button>
+      </div>
+
+      <div style="
+        display:grid;
+        grid-template-columns:1fr;
+        gap:8px;
+        margin-top:14px;
+      ">
+        <button id="mhs-layout-auto">✓ Auto Align / Correct</button>
+        <button id="mhs-layout-gridbtn">Snap to 5px Grid</button>
+        <button id="mhs-layout-save">Save to MHS Display</button>
+        <button id="mhs-layout-reset">Reset Default Layout</button>
+      </div>
+
+      <div id="mhs-layout-status" style="
+        margin-top:12px;
+        color:#7fdb8a;
+        min-height:20px;
+        font-size:13px;
+      "></div>
+    </div>
+  </div>
+</section>
+
+<script>
+(function() {
+  const names = [
+    ["title", "Title"],
+    ["clock", "Clock"],
+    ["cpu", "CPU"],
+    ["temp", "Temperature"],
+    ["ram", "RAM"],
+    ["disk", "Disk"],
+    ["uptime", "Uptime"],
+    ["tailscale", "Tailscale"]
+  ];
+
+  const defaults = {
+    title:{x:16,y:14},
+    clock:{x:464,y:14},
+    cpu:{x:60,y:55},
+    temp:{x:180,y:55},
+    ram:{x:300,y:55},
+    disk:{x:420,y:55},
+    uptime:{x:25,y:170},
+    tailscale:{x:258,y:170}
+  };
+
+  let layout = null;
+  let selected = "cpu";
+  let drag = null;
+
+  const canvas = document.getElementById("mhs-layout-canvas");
+  const live = document.getElementById("mhs-layout-live");
+  const select = document.getElementById("mhs-layout-select");
+  const xInput = document.getElementById("mhs-layout-x");
+  const yInput = document.getElementById("mhs-layout-y");
+  const status = document.getElementById("mhs-layout-status");
+
+  /*
+   * IMPORTANT:
+   * These geometries match dashboard.py.
+   *
+   * Top groups:
+   *   x = CENTER of group
+   *   y = TOP of icon
+   *
+   * Bottom groups:
+   *   x = LEFT of icon
+   *   y = TOP of icon
+   *
+   * Therefore the editor boxes now represent the REAL rendered groups.
+   */
+  const geometry = {
+    title:     {w:180, h:30,  anchor:"tl"},
+    clock:     {w:90,  h:30,  anchor:"tr"},
+
+    cpu:       {w:110, h:105, anchor:"center"},
+    temp:      {w:110, h:105, anchor:"center"},
+    ram:       {w:110, h:105, anchor:"center"},
+    disk:      {w:110, h:105, anchor:"center"},
+
+    uptime:    {w:205, h:52,  anchor:"tl"},
+    tailscale: {w:210, h:52,  anchor:"tl"}
+  };
+
+
+
+  names.forEach(([id,label]) => {
+    const o = document.createElement("option");
+    o.value = id;
+    o.textContent = label;
+    select.appendChild(o);
+  });
+
+  function say(msg,bad=false) {
+    status.textContent = msg;
+    status.style.color = bad ? "#ff7777" : "#7fdb8a";
+  }
+
+  function ensureItems() {
+    if (!layout || !layout.items) {
+      layout = {
+        version:2,
+        canvas:{width:480,height:320,safe_margin:12},
+        items:{}
+      };
+    }
+
+    for (const [id] of names) {
+      if (!layout.items[id]) {
+        layout.items[id] = {...defaults[id]};
+      }
+    }
+  }
+
+  function selectedItem() {
+    ensureItems();
+    return layout.items[selected];
+  }
+
+  /*
+   * Convert renderer coordinates into the editor box's top-left.
+   */
+  function boxGeometry(id,p) {
+    const g = geometry[id] || {w:100,h:40,anchor:"center"};
+
+    let left = Number(p.x);
+    let top  = Number(p.y);
+
+    if (g.anchor === "center") {
+      left -= g.w / 2;
+    }
+
+    if (g.anchor === "tr") {
+      left -= g.w;
+    }
+
+    return {
+      left,
+      top,
+      width:g.w,
+      height:g.h
+    };
+  }
+
+  function syncInputs() {
+    const p = selectedItem();
+
+    xInput.value = Math.round(p.x);
+    yInput.value = Math.round(p.y);
+    select.value = selected;
+  }
+
+  function makeBox(id,label) {
+    let box = document.getElementById("mhs-layout-box-" + id);
+
+    if (!box) {
+      box = document.createElement("div");
+
+      box.id = "mhs-layout-box-" + id;
+      box.dataset.id = id;
+
+      box.style.position = "absolute";
+      box.style.boxSizing = "border-box";
+      box.style.border = "1px dashed rgba(255,255,255,.35)";
+      box.style.borderRadius = "5px";
+      box.style.color = "#fff";
+      box.style.font = "11px Arial";
+      box.style.display = "flex";
+      box.style.alignItems = "flex-start";
+      box.style.justifyContent = "center";
+      box.style.paddingTop = "3px";
+      box.style.background = "rgba(0,80,0,.10)";
+      box.style.cursor = "move";
+      box.style.zIndex = "5";
+      box.style.pointerEvents = "auto";
+
+      box.textContent = label;
+
+      box.addEventListener("pointerdown", function(e) {
+        e.preventDefault();
+
+        selected = id;
+        syncInputs();
+
+        const p = selectedItem();
+
+        drag = {
+          id:id,
+          startX:e.clientX,
+          startY:e.clientY,
+          x:Number(p.x),
+          y:Number(p.y)
+        };
+
+        box.setPointerCapture(e.pointerId);
+      });
+
+      box.addEventListener("pointermove", function(e) {
+        if (!drag || drag.id !== id) return;
+
+        const dx =
+          (e.clientX - drag.startX) *
+          (480 / canvas.clientWidth);
+
+        const dy =
+          (e.clientY - drag.startY) *
+          (320 / canvas.clientHeight);
+
+        layout.items[id].x =
+          Math.max(0, Math.min(480, drag.x + dx));
+
+        layout.items[id].y =
+          Math.max(0, Math.min(320, drag.y + dy));
+
+        render();
+      });
+
+      box.addEventListener("pointerup", function() {
+        drag = null;
+      });
+
+      box.addEventListener("pointercancel", function() {
+        drag = null;
+      });
+
+      canvas.appendChild(box);
+    }
+
+    return box;
+  }
+
+  function render() {
+    ensureItems();
+
+    for (const [id,label] of names) {
+      const p = layout.items[id];
+      const g = boxGeometry(id,p);
+      const box = makeBox(id,label);
+
+      box.style.left = g.left + "px";
+      box.style.top = g.top + "px";
+      box.style.width = g.width + "px";
+      box.style.height = g.height + "px";
+
+      if (id === selected) {
+        box.style.border = "2px solid #00ff55";
+        box.style.background = "rgba(0,255,80,.12)";
+      } else {
+        box.style.border = "1px dashed rgba(255,255,255,.35)";
+        box.style.background = "rgba(0,80,0,.08)";
+      }
+    }
+
+    syncInputs();
+  }
+
+  function autoAlign() {
+    ensureItems();
+
+    Object.assign(
+      layout.items,
+      JSON.parse(JSON.stringify(defaults))
+    );
+
+    render();
+
+    say("Auto-aligned to the balanced 480×320 MHS layout.");
+  }
+
+  async function loadLayout() {
+    try {
+      const r = await fetch(
+        "/api/proxmox-layout",
+        {cache:"no-store"}
+      );
+
+      if (!r.ok) {
+        throw new Error("HTTP " + r.status);
+      }
+
+      layout = await r.json();
+
+      ensureItems();
+      render();
+
+      say("Layout loaded.");
+    }
+    catch(e) {
+      layout = {
+        version:2,
+        canvas:{
+          width:480,
+          height:320,
+          safe_margin:12
+        },
+        items:JSON.parse(JSON.stringify(defaults))
+      };
+
+      render();
+
+      say(
+        "Using balanced default layout: " + e.message,
+        true
+      );
+    }
+  }
+
+  async function saveLayout() {
+    ensureItems();
+
+    try {
+      const r = await fetch(
+        "/api/proxmox-layout",
+        {
+          method:"POST",
+          headers:{
+            "Content-Type":"application/json"
+          },
+          body:JSON.stringify(layout)
+        }
+      );
+
+      const data = await r.json();
+
+      if (!r.ok) {
+        throw new Error(
+          data.error || ("HTTP " + r.status)
+        );
+      }
+
+      say(
+        "Saved — physical MHS display updated automatically."
+      );
+    }
+    catch(e) {
+      say(
+        "Save failed: " + e.message,
+        true
+      );
+    }
+  }
+
+  function nudge(dx,dy) {
+    const p = selectedItem();
+
+    p.x = Math.max(
+      0,
+      Math.min(480, Number(p.x) + dx)
+    );
+
+    p.y = Math.max(
+      0,
+      Math.min(320, Number(p.y) + dy)
+    );
+
+    render();
+  }
+
+  select.addEventListener("change",function() {
+    selected = select.value;
+    render();
+  });
+
+  xInput.addEventListener("change",function() {
+    selectedItem().x =
+      Math.max(0,Math.min(480,Number(xInput.value) || 0));
+
+    render();
+  });
+
+  yInput.addEventListener("change",function() {
+    selectedItem().y =
+      Math.max(0,Math.min(320,Number(yInput.value) || 0));
+
+    render();
+  });
+
+  document.getElementById("mhs-layout-up")
+    .onclick = () => nudge(0,-1);
+
+  document.getElementById("mhs-layout-down")
+    .onclick = () => nudge(0,1);
+
+  document.getElementById("mhs-layout-left")
+    .onclick = () => nudge(-1,0);
+
+  document.getElementById("mhs-layout-right")
+    .onclick = () => nudge(1,0);
+
+  document.getElementById("mhs-layout-auto")
+    .onclick = autoAlign;
+
+  document.getElementById("mhs-layout-gridbtn")
+    .onclick = function() {
+      const p = selectedItem();
+
+      p.x = Math.round(p.x / 5) * 5;
+      p.y = Math.round(p.y / 5) * 5;
+
+      render();
+
+      say("Selected group snapped to 5px grid.");
+    };
+
+  document.getElementById("mhs-layout-save")
+    .onclick = saveLayout;
+
+  document.getElementById("mhs-layout-reset")
+    .onclick = function() {
+      if (
+        confirm(
+          "Reset the Proxmox display layout to the balanced default?"
+        )
+      ) {
+        autoAlign();
+      }
+    };
+
+  loadLayout();
+
+})();
+</script>
+
 </body>
 </html>
