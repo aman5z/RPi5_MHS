@@ -3,3 +3,9 @@ __pycache__/
 config.json
 __pycache__/
 config.json
+
+# Runtime data
+devices.json
+
+# Local backup files
+*.backup-*
