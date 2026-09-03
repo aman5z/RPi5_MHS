@@ -11,6 +11,15 @@ let THEME_PRESETS = [
 
 let screenLabels = {};
 
+function escHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function fetchJSON(url, options) {
   const res = await fetch(url, options);
   const data = await res.json().catch(() => ({}));
@@ -336,11 +345,13 @@ function renderArpDevices(devices) {
   Object.entries(devices || {}).forEach(([mac, entry]) => {
     const li = document.createElement("li");
     li.className = "screen-item";
+    const safeMac = escHtml(mac);
+    const safeIp = escHtml((entry && entry.last_ip) || "--");
     li.innerHTML = `
       <div class="screen-item-content">
-        <strong>${mac}</strong>
-        <span>IP: ${(entry && entry.last_ip) || "--"}</span>
-        <button type="button" class="secondary arp-allow-btn" data-mac="${mac}">Allowlist</button>
+        <strong>${safeMac}</strong>
+        <span>IP: ${safeIp}</span>
+        <button type="button" class="secondary arp-allow-btn" data-mac="${safeMac}">Allowlist</button>
       </div>`;
     list.appendChild(li);
   });
@@ -365,12 +376,16 @@ function renderScheduleRules(rules) {
     li.className = "screen-item";
     li.innerHTML = `
       <div class="screen-item-content">
-        <label>Start <input type="time" class="sched-start" value="${rule.start_time || "00:00"}"></label>
-        <label>End <input type="time" class="sched-end" value="${rule.end_time || "23:59"}"></label>
-        <label>Days <input type="text" class="sched-days" value="${Array.isArray(rule.days) ? rule.days.join(",") : (rule.days || "all")}" placeholder="all or mon,tue"></label>
-        <label>Screens <input type="text" class="sched-screens" value="${(rule.screens || []).join(",")}" placeholder="clock,alerts"></label>
+        <label>Start <input type="time" class="sched-start"></label>
+        <label>End <input type="time" class="sched-end"></label>
+        <label>Days <input type="text" class="sched-days" placeholder="all or mon,tue"></label>
+        <label>Screens <input type="text" class="sched-screens" placeholder="clock,alerts"></label>
         <button type="button" class="secondary sched-remove-btn" data-idx="${idx}">Remove</button>
       </div>`;
+    li.querySelector(".sched-start").value = String(rule.start_time || "00:00");
+    li.querySelector(".sched-end").value = String(rule.end_time || "23:59");
+    li.querySelector(".sched-days").value = Array.isArray(rule.days) ? rule.days.join(",") : String(rule.days || "all");
+    li.querySelector(".sched-screens").value = (rule.screens || []).join(",");
     list.appendChild(li);
   });
   list.querySelectorAll(".sched-remove-btn").forEach((btn) => btn.addEventListener("click", () => btn.closest("li").remove()));
@@ -397,11 +412,14 @@ function renderCountdowns(items) {
     li.className = "screen-item";
     li.innerHTML = `
       <div class="screen-item-content">
-        <label>Label <input type="text" class="countdown-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></label>
-        <label>Date <input type="date" class="countdown-date" value="${(it.target_date || "").slice(0, 10)}"></label>
-        <label>Icon <input type="text" class="countdown-icon" value="${(it.icon || "").replace(/"/g, "&quot;")}"></label>
+        <label>Label <input type="text" class="countdown-label"></label>
+        <label>Date <input type="date" class="countdown-date"></label>
+        <label>Icon <input type="text" class="countdown-icon"></label>
         <button type="button" class="secondary countdown-remove-btn">Remove</button>
       </div>`;
+    li.querySelector(".countdown-label").value = String(it.label || "");
+    li.querySelector(".countdown-date").value = String((it.target_date || "").slice(0, 10));
+    li.querySelector(".countdown-icon").value = String(it.icon || "");
     list.appendChild(li);
   });
   list.querySelectorAll(".countdown-remove-btn").forEach((btn) => btn.addEventListener("click", () => btn.closest("li").remove()));
@@ -423,11 +441,14 @@ function renderHabits(items) {
     const li = document.createElement("li");
     li.className = "screen-item";
     li.dataset.id = it.id || "";
+    const safeId = escHtml(it.id || "");
+    const safeLabel = escHtml(it.label || "");
+    const safeIcon = escHtml(it.icon || "");
     li.innerHTML = `
       <div class="screen-item-content">
-        <label>ID <input type="text" class="habit-id" value="${(it.id || "").replace(/"/g, "&quot;")}"></label>
-        <label>Label <input type="text" class="habit-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></label>
-        <label>Icon <input type="text" class="habit-icon" value="${(it.icon || "").replace(/"/g, "&quot;")}"></label>
+        <label>ID <input type="text" class="habit-id" value="${safeId}"></label>
+        <label>Label <input type="text" class="habit-label" value="${safeLabel}"></label>
+        <label>Icon <input type="text" class="habit-icon" value="${safeIcon}"></label>
         <button type="button" class="secondary habit-toggle-btn">Toggle Today</button>
         <button type="button" class="secondary habit-remove-btn">Remove</button>
       </div>`;

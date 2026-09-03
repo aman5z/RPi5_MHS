@@ -726,7 +726,12 @@ def _profile_path(name):
     safe = re.sub(r"[^a-z0-9._-]+", "-", safe).strip("-.")
     if not safe:
         raise ValueError("Invalid profile name")
-    return os.path.join(PROFILES_DIR, f"{safe}.json"), safe
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    base = os.path.abspath(PROFILES_DIR)
+    path = os.path.abspath(os.path.join(base, f"{safe}.json"))
+    if not path.startswith(base + os.sep):
+        raise ValueError("Invalid profile name")
+    return path, safe
 
 
 def list_profiles():
