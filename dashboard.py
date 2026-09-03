@@ -5,12 +5,14 @@ import glob
 import time
 import math
 import json
+import random
+import hashlib
 import socket
 import threading
 import io
 import subprocess
 import requests
-from datetime import datetime
+from datetime import datetime, date
 from PIL import Image, ImageDraw, ImageFont
 
 import numpy as np
@@ -18,12 +20,21 @@ import numpy as np
 import dashboard_config as cfgmod
 import tailscale_status
 import proxmox_status
+import uptime_kuma_status
+import firewall_status
+import pihole_status
 
 FB = "/dev/fb0"
 HWMON_ROOT = "/sys/class/hwmon"
 THERMAL_ZONE = "/sys/class/thermal/thermal_zone0/temp"
 
 W, H = 480, 320
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PORT_BASELINE_FILE = os.path.join(BASE_DIR, "port_baseline.json")
+ARP_BASELINE_FILE = os.path.join(BASE_DIR, "arp_baseline.json")
+HABITS_STATE_FILE = os.path.join(BASE_DIR, "habits_state.json")
+QUOTES_FILE = os.path.join(BASE_DIR, "quotes.json")
+LAST_FRAME_PNG = "/tmp/mhs_last_frame.png"
 
 # ---------------------------------------------------------
 # CONFIG (theme / fonts / alignment / timing / screens), loaded from
@@ -114,7 +125,7 @@ def apply_config(cfg):
     global ICON_ANIMATIONS_ENABLED
     global clock_font, date_font, value_font, big_value_font
     global small_font, ip_font, title_font
-    global SCREEN_RENDERERS, NUM_SCREENS
+    global SCREEN_RENDERERS, NUM_SCREENS, _enabled_screen_ids
 
     CONFIG = cfg
 
@@ -141,21 +152,9 @@ def apply_config(cfg):
     ip_font        = get_font(font_bold, fonts["ip_size"])
     title_font     = get_font(font_bold, fonts["title_size"])
 
-    enabled_ids = [s["id"] for s in cfg["screens"] if s["enabled"]]
-
-    if not enabled_ids:
-        enabled_ids = ["clock"]
-
-    SCREEN_RENDERERS = [SCREEN_RENDERER_MAP[sid] for sid in enabled_ids if sid in SCREEN_RENDERER_MAP]
-
-    if not SCREEN_RENDERERS:
-        SCREEN_RENDERERS = [draw_screen_clock]
-
-    NUM_SCREENS = len(SCREEN_RENDERERS)
-
-    # Apply brightness to backlight if configured and available.
-    brightness = cfg.get("display", {}).get("brightness", 100)
-    set_brightness(brightness)
+    _enabled_screen_ids = [s["id"] for s in cfg["screens"] if s["enabled"]]
+    _rebuild_screen_renderers_for_schedule()
+    _maybe_apply_night_brightness()
 
 
 def reload_config_if_changed():
@@ -174,6 +173,9 @@ def reload_config_if_changed():
 
 weather_temp = "--"
 weather_humidity = "--"
+weather_aqi = None
+weather_aqi_label = ""
+weather_aqi_color = None
 last_weather = 0
 weather_lat = None
 weather_lon = None
@@ -203,6 +205,31 @@ _LOCATION_CACHE_SECS = 1800  # re-resolve at most every 30 minutes
 # Dict: host -> deque of (timestamp, latency_ms or None)
 _ping_history = {}  # populated lazily from CONFIG ping_targets
 _PING_HISTORY_LEN = 40
+
+# Integrations + local background scanners
+_uptime_kuma = {"available": False, "monitors": []}
+_firewall = {"available": False}
+_pihole = {"available": False}
+_last_port_scan = 0.0
+_port_scan_alerts = []
+_last_arp_scan = 0.0
+_arp_alerts = []
+_arp_devices = {}
+_quotes = []
+_last_frame_png_write = 0.0
+_last_brightness_applied = None
+_enabled_screen_ids = []
+
+
+def _rebuild_screen_renderers_for_schedule():
+    global SCREEN_RENDERERS, NUM_SCREENS
+    enabled_ids = _scheduled_screen_ids() if _enabled_screen_ids else []
+    if not enabled_ids:
+        enabled_ids = _enabled_screen_ids or ["clock"]
+    SCREEN_RENDERERS = [SCREEN_RENDERER_MAP[sid] for sid in enabled_ids if sid in SCREEN_RENDERER_MAP]
+    if not SCREEN_RENDERERS:
+        SCREEN_RENDERERS = [draw_screen_clock]
+    NUM_SCREENS = len(SCREEN_RENDERERS)
 
 
 # ---------------------------------------------------------
@@ -295,6 +322,173 @@ def set_notifications_store(store):
     global _notifications_store
     _notifications_store = store
 
+
+# ---------------------------------------------------------
+# EXTRA PERSISTED STATE HELPERS
+# ---------------------------------------------------------
+
+def _load_json_file(path, default):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data
+    except Exception:
+        return default
+
+
+def _save_json_file(path, data):
+    try:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def get_arp_devices():
+    return _arp_devices
+
+
+def allowlist_arp_device(mac):
+    mac = str(mac or "").strip().lower()
+    if not mac:
+        return False
+    baseline = _load_json_file(ARP_BASELINE_FILE, {"devices": {}})
+    devices = baseline.setdefault("devices", {})
+    ent = devices.setdefault(mac, {})
+    ent["allowlisted"] = True
+    _save_json_file(ARP_BASELINE_FILE, baseline)
+    return True
+
+
+def get_habits_state():
+    return _load_json_file(HABITS_STATE_FILE, {})
+
+
+def toggle_habit_today(habit_id):
+    hid = str(habit_id or "").strip()
+    if not hid:
+        return False
+    state = get_habits_state()
+    ent = state.setdefault(hid, {"completed_dates": []})
+    dates = set(ent.get("completed_dates", []))
+    today = date.today().isoformat()
+    if today in dates:
+        dates.remove(today)
+    else:
+        dates.add(today)
+    ent["completed_dates"] = sorted(dates)
+    _save_json_file(HABITS_STATE_FILE, state)
+    return True
+
+
+def get_habits_view():
+    state = get_habits_state()
+    today = date.today()
+    out = []
+    for h in CONFIG.get("habits", []):
+        hid = h.get("id")
+        ent = state.get(hid, {"completed_dates": []})
+        completed = sorted(set(ent.get("completed_dates", [])))
+        streak = 0
+        d = today
+        while d.isoformat() in completed:
+            streak += 1
+            d = d.fromordinal(d.toordinal() - 1)
+        out.append({
+            "id": hid,
+            "label": h.get("label", hid),
+            "icon": h.get("icon", ""),
+            "today_done": today.isoformat() in completed,
+            "streak": streak,
+            "completed_dates": completed,
+        })
+    return out
+
+
+def _load_quotes():
+    global _quotes
+    if _quotes:
+        return
+    data = _load_json_file(QUOTES_FILE, [])
+    if isinstance(data, list):
+        _quotes = [q for q in data if isinstance(q, dict) and q.get("text")]
+
+
+def _pick_quote():
+    _load_quotes()
+    if not _quotes:
+        return {"text": "No quotes configured.", "author": ""}
+    qcfg = CONFIG.get("quotes", {})
+    if qcfg.get("rotate_daily", True):
+        idx = int(hashlib.sha256(date.today().isoformat().encode("utf-8")).hexdigest()[:8], 16) % len(_quotes)
+        return _quotes[idx]
+    return random.choice(_quotes)
+
+
+def list_slideshow_images():
+    s_cfg = CONFIG.get("slideshow", {})
+    folder = str(s_cfg.get("folder", "photos"))
+    if not os.path.isabs(folder):
+        folder = os.path.join(BASE_DIR, folder)
+    try:
+        names = sorted([n for n in os.listdir(folder) if n.lower().endswith((".jpg", ".jpeg", ".png"))])
+        return folder, names
+    except Exception:
+        return folder, []
+
+
+def _parse_hhmm(value):
+    try:
+        hh, mm = str(value).split(":")
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return 0
+
+
+def _time_in_window(now_min, start_min, end_min):
+    if start_min == end_min:
+        return True
+    if start_min < end_min:
+        return start_min <= now_min < end_min
+    return now_min >= start_min or now_min < end_min
+
+
+def _scheduled_screen_ids():
+    base_ids = [s["id"] for s in CONFIG.get("screens", []) if s.get("enabled")]
+    sch = CONFIG.get("scheduling", {})
+    if not sch.get("enabled"):
+        return base_ids
+    now = datetime.now()
+    now_min = now.hour * 60 + now.minute
+    weekday = now.strftime("%a").lower()[:3]
+    for rule in sch.get("rules", []):
+        days = rule.get("days", "all")
+        if days != "all" and weekday not in days:
+            continue
+        if _time_in_window(now_min, _parse_hhmm(rule.get("start_time")), _parse_hhmm(rule.get("end_time"))):
+            filtered = [sid for sid in rule.get("screens", []) if sid in base_ids]
+            if filtered:
+                return filtered
+    return base_ids
+
+
+def _maybe_apply_night_brightness():
+    global _last_brightness_applied
+    display_brightness = int(CONFIG.get("display", {}).get("brightness", 100))
+    target = display_brightness
+    sch = CONFIG.get("scheduling", {})
+    night = sch.get("night_mode", {})
+    if sch.get("enabled") and night.get("enabled"):
+        now = datetime.now()
+        now_min = now.hour * 60 + now.minute
+        if _time_in_window(now_min, _parse_hhmm(night.get("start_time")), _parse_hhmm(night.get("end_time"))):
+            target = int(night.get("dim_brightness", display_brightness))
+    if target != _last_brightness_applied:
+        _last_brightness_applied = target
+        set_brightness(target)
 
 # ---------------------------------------------------------
 # SYSTEM DATA
@@ -429,6 +623,9 @@ def update_weather():
 
     global weather_temp
     global weather_humidity
+    global weather_aqi
+    global weather_aqi_label
+    global weather_aqi_color
     global last_weather
     global weather_lat
     global weather_lon
@@ -470,6 +667,22 @@ def update_weather():
 
         weather_temp = round(d["temperature_2m"], 1)
         weather_humidity = int(d["relative_humidity_2m"])
+
+        if weather_cfg.get("show_aqi") and weather_lat is not None and weather_lon is not None:
+            ar = requests.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={
+                    "latitude": weather_lat,
+                    "longitude": weather_lon,
+                    "current": "us_aqi",
+                },
+                timeout=5,
+            )
+            ad = ar.json().get("current", {})
+            val = ad.get("us_aqi")
+            if val is not None:
+                weather_aqi = int(val)
+                weather_aqi_label, weather_aqi_color = _aqi_category(weather_aqi)
 
         last_weather = time.time()
 
@@ -583,6 +796,130 @@ def update_ping_samples():
     t = threading.Thread(target=_sample, daemon=True)
     t.start()
 
+
+def update_integrations():
+    global _uptime_kuma, _firewall, _pihole
+    try:
+        _uptime_kuma = uptime_kuma_status.get_status(CONFIG.get("uptime_kuma", {}))
+    except Exception:
+        pass
+
+
+def get_uptime_kuma_data(force=False):
+    try:
+        return uptime_kuma_status.get_status(CONFIG.get("uptime_kuma", {}), force=force)
+    except Exception:
+        return {"available": False, "error": "fetch failed", "monitors": []}
+
+
+def get_firewall_data(force=False):
+    try:
+        return firewall_status.get_status(CONFIG.get("firewall", {}), force=force)
+    except Exception:
+        return {"available": False, "error": "fetch failed", "wan_up": None, "throughput": {}, "block_count": None}
+
+
+def get_pihole_data(force=False):
+    try:
+        return pihole_status.get_status(CONFIG.get("pihole", {}), force=force)
+    except Exception:
+        return {"available": False, "error": "fetch failed"}
+    try:
+        _firewall = firewall_status.get_status(CONFIG.get("firewall", {}))
+    except Exception:
+        pass
+    try:
+        _pihole = pihole_status.get_status(CONFIG.get("pihole", {}))
+    except Exception:
+        pass
+
+
+def _resolve_port_scan_target():
+    target = str(CONFIG.get("port_scan", {}).get("target", "localhost")).strip()
+    if target in ("", "localhost", "auto"):
+        return get_ip() or "127.0.0.1"
+    return target
+
+
+def _scan_common_ports(host):
+    ports = [20, 21, 22, 23, 25, 53, 80, 110, 123, 143, 443, 445, 465, 587, 993, 995, 3306, 3389, 5432, 8080, 8443]
+    open_ports = []
+    for p in ports:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.3)
+            if s.connect_ex((host, p)) == 0:
+                open_ports.append(p)
+            s.close()
+        except Exception:
+            continue
+    return open_ports
+
+
+def update_port_scan():
+    global _last_port_scan, _port_scan_alerts
+    cfg = CONFIG.get("port_scan", {})
+    if not cfg.get("enabled"):
+        return
+    now = time.time()
+    interval = max(3600, int(cfg.get("interval_hours", 24)) * 3600)
+    if now - _last_port_scan < interval:
+        return
+    _last_port_scan = now
+    host = _resolve_port_scan_target()
+    open_ports = _scan_common_ports(host)
+    baseline = _load_json_file(PORT_BASELINE_FILE, {"target": host, "open_ports": []})
+    old_ports = set(baseline.get("open_ports", []))
+    new_ports = sorted(set(open_ports) - old_ports)
+    _port_scan_alerts = [f"New open port detected: {p}" for p in new_ports]
+    _save_json_file(PORT_BASELINE_FILE, {"target": host, "open_ports": sorted(open_ports), "last_scan": int(now)})
+
+
+def _read_arp_table():
+    entries = []
+    try:
+        with open("/proc/net/arp") as f:
+            lines = f.read().splitlines()[1:]
+        for ln in lines:
+            parts = ln.split()
+            if len(parts) >= 6:
+                ip, _, _, mac, _, iface = parts[:6]
+                if mac != "00:00:00:00:00:00":
+                    entries.append({"ip": ip, "mac": mac.lower(), "interface": iface})
+    except Exception:
+        pass
+    return entries
+
+
+def update_arp_watch():
+    global _last_arp_scan, _arp_alerts, _arp_devices
+    cfg = CONFIG.get("arp_watch", {})
+    if not cfg.get("enabled"):
+        _arp_devices = {}
+        return
+    now = time.time()
+    if now - _last_arp_scan < 60:
+        return
+    _last_arp_scan = now
+    entries = _read_arp_table()
+    baseline = _load_json_file(ARP_BASELINE_FILE, {"devices": {}})
+    devices = baseline.setdefault("devices", {})
+    iface_cfg = str(cfg.get("interface", "auto")).strip()
+    _arp_alerts = []
+    for ent in entries:
+        if iface_cfg not in ("", "auto") and ent["interface"] != iface_cfg:
+            continue
+        mac = ent["mac"]
+        known = devices.get(mac)
+        if not known:
+            devices[mac] = {"last_ip": ent["ip"], "allowlisted": False, "first_seen": int(now), "last_seen": int(now)}
+            _arp_alerts.append(f"New device on LAN: {mac} ({ent['ip']})")
+        else:
+            known["last_ip"] = ent["ip"]
+            known["last_seen"] = int(now)
+    _arp_devices = devices
+    _save_json_file(ARP_BASELINE_FILE, baseline)
+
 def centered(draw, text, font, y):
     aligned(draw, text, font, y, "center")
 
@@ -637,6 +974,99 @@ def _draw_footer(draw, screen_id, default_text=""):
     text = screen_cfg.get("footer_text") or default_text
     footer_align = CONFIG.get("alignment", {}).get("footer", "center")
     aligned(draw, text, small_font, 292, footer_align)
+
+
+def _new_screen_canvas(t):
+    image = Image.new("RGB", (W, H), BLACK)
+    draw = ImageDraw.Draw(image)
+    if CONFIG.get("theme", {}).get("background_effect") == "matrix_rain":
+        _draw_matrix_background(draw, t)
+    return image, draw
+
+
+def _draw_matrix_background(draw, t):
+    cols = 28
+    col_w = W / cols
+    chars = "01ABCDEF"
+    color = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("foreground", "#00FF66"))
+    for c in range(cols):
+        seed = ((c * 37) + int(t * 12)) % 64
+        y = ((seed * 13) + int(t * 70)) % (H + 40) - 40
+        x = int(c * col_w + 4)
+        for i in range(4):
+            yy = y - i * 14
+            if 0 <= yy < H:
+                ch = chars[(seed + i + c) % len(chars)]
+                shade = max(30, 180 - i * 45)
+                draw.text((x, yy), ch, font=small_font, fill=(min(255, color[0] * shade // 180), min(255, color[1] * shade // 180), min(255, color[2] * shade // 180)))
+
+
+def _aqi_category(value):
+    warn = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("warn_color", "#FFAA00"))
+    alert = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
+    if value <= 50:
+        return "Good", WHITE
+    if value <= 100:
+        return "Moderate", SECONDARY
+    if value <= 150:
+        return "USG", warn
+    if value <= 200:
+        return "Unhealthy", alert
+    return "Hazardous", alert
+
+
+def _moon_phase_label(now_dt):
+    # Synodic-month approximation (days since known new moon)
+    reference = datetime(2001, 1, 24, 13, 0, 0)
+    synodic = 29.53058867
+    days = (now_dt - reference).total_seconds() / 86400.0
+    phase = (days % synodic) / synodic
+    if phase < 0.03 or phase > 0.97:
+        return "New", "●"
+    if phase < 0.22:
+        return "Waxing", "◔"
+    if phase < 0.28:
+        return "First Q", "◑"
+    if phase < 0.47:
+        return "Waxing", "◕"
+    if phase < 0.53:
+        return "Full", "○"
+    if phase < 0.72:
+        return "Waning", "◕"
+    if phase < 0.78:
+        return "Last Q", "◑"
+    return "Waning", "◔"
+
+
+def _sunrise_sunset_text(now_dt):
+    if weather_lat is None or weather_lon is None:
+        return "--"
+    # NOAA-inspired simplified calculation
+    def _calc(is_sunrise):
+        n = now_dt.timetuple().tm_yday
+        lng_hour = weather_lon / 15.0
+        t = n + ((6 - lng_hour) / 24.0 if is_sunrise else (18 - lng_hour) / 24.0)
+        m = (0.9856 * t) - 3.289
+        l = (m + (1.916 * math.sin(math.radians(m))) + (0.020 * math.sin(2 * math.radians(m))) + 282.634) % 360
+        ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(l)))) % 360
+        lq = (math.floor(l / 90)) * 90
+        raq = (math.floor(ra / 90)) * 90
+        ra = (ra + (lq - raq)) / 15.0
+        sin_dec = 0.39782 * math.sin(math.radians(l))
+        cos_dec = math.cos(math.asin(sin_dec))
+        cos_h = (math.cos(math.radians(90.833)) - (sin_dec * math.sin(math.radians(weather_lat)))) / (cos_dec * math.cos(math.radians(weather_lat)))
+        if cos_h < -1 or cos_h > 1:
+            return None
+        h = (360 - math.degrees(math.acos(cos_h)) if is_sunrise else math.degrees(math.acos(cos_h))) / 15.0
+        t_local = (h + ra - (0.06571 * t) - 6.622 - lng_hour) % 24
+        hh = int(t_local)
+        mm = int((t_local - hh) * 60)
+        return hh, mm
+    sr = _calc(True)
+    ss = _calc(False)
+    if not sr or not ss:
+        return "--"
+    return f"↑{sr[0]:02d}:{sr[1]:02d} ↓{ss[0]:02d}:{ss[1]:02d}"
 
 
 # ---------------------------------------------------------
@@ -990,7 +1420,7 @@ _latest_frame_lock = threading.Lock()
 
 
 def set_latest_frame(image):
-    global _latest_frame
+    global _latest_frame, _last_frame_png_write
 
     buf = io.BytesIO()
     image.save(buf, format="JPEG", quality=82, optimize=False)
@@ -1007,6 +1437,15 @@ def set_latest_frame(image):
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, final)
+    except OSError:
+        pass
+    try:
+        now = time.time()
+        if now - _last_frame_png_write >= 1.0:
+            tmp = LAST_FRAME_PNG + ".tmp"
+            image.save(tmp, format="PNG")
+            os.replace(tmp, LAST_FRAME_PNG)
+            _last_frame_png_write = now
     except OSError:
         pass
 
@@ -1043,8 +1482,7 @@ def write_fb(image):
 def draw_screen_clock(t, sysdata):
     """Screen 1: Time, Day, Date, Weather (temperature + humidity) only."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     at = _anim_t(t)
     now = datetime.now()
@@ -1065,6 +1503,16 @@ def draw_screen_clock(t, sysdata):
     icon_drop(draw, 270, 168, at)
     draw.text((322, 172), "HUMIDITY", font=small_font, fill=SECONDARY)
     draw.text((322, 191), f"{weather_humidity}%", font=big_value_font, fill=WHITE)
+    wx_cfg = CONFIG.get("weather", {})
+    if wx_cfg.get("show_aqi") and weather_aqi is not None:
+        draw.text((92, 214), f"AQI {weather_aqi} ({weather_aqi_label})", font=small_font, fill=weather_aqi_color or SECONDARY)
+
+    if wx_cfg.get("show_moon_phase"):
+        moon_label, moon_icon = _moon_phase_label(now)
+        draw.text((380, 214), f"{moon_icon} {moon_label[:6]}", font=small_font, fill=SECONDARY)
+
+    if wx_cfg.get("show_sun_times"):
+        draw.text((12, 236), _sunrise_sunset_text(now), font=small_font, fill=SECONDARY)
 
     draw.line((12, 252, W-12, 252), fill=WHITE, width=1)
 
@@ -1087,8 +1535,7 @@ def draw_screen_clock(t, sysdata):
 
 def draw_screen_system(t, sysdata):
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     at = _anim_t(t)
     cpu = sysdata["cpu"]
@@ -1211,8 +1658,7 @@ def _get_uptime():
 def draw_screen_network(t, sysdata):
     """Screen 2: Hostname, LAN IP, Wi-Fi SSID, uptime."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     at = _anim_t(t)
     now = datetime.now()
@@ -1320,8 +1766,7 @@ def _get_swap():
 def draw_screen_stats(t, sysdata):
     """Screen 3: CPU history sparkline, top process, swap usage."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     now = datetime.now()
     cpu = sysdata["cpu"]
@@ -1451,8 +1896,7 @@ def _remote_uptime(seconds):
 def draw_screen_devices(t, sysdata):
     """Screen 4: Proxmox system-status style remote device screen."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     at = _anim_t(t)
     now = datetime.now()
@@ -1738,8 +2182,7 @@ def draw_screen_devices(t, sysdata):
 def draw_screen_ping(t, sysdata):
     """Screen 5: Sparkline latency graph per configured ping target."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     now = datetime.now()
     ALERT = cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
@@ -1885,14 +2328,21 @@ def _collect_alerts(sysdata):
                 label = tgt.get("label", host)[:14]
                 items.append(("warn", f"PING FAIL: {label}"))
 
+    # Port scan deltas
+    for msg in _port_scan_alerts[:6]:
+        items.append(("warn", msg[:42]))
+
+    # ARP new device alerts
+    for msg in _arp_alerts[:6]:
+        items.append(("warn", msg[:42]))
+
     return items
 
 
 def draw_screen_alerts(t, sysdata):
     """Screen 6: Aggregated system alerts with severity colour coding."""
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     at = _anim_t(t)
     now = datetime.now()
@@ -1958,8 +2408,7 @@ def draw_screen_notifications(t, sysdata):
     scope for this implementation — this builds the receiving/display side.
     """
 
-    image = Image.new("RGB", (W, H), BLACK)
-    draw = ImageDraw.Draw(image)
+    image, draw = _new_screen_canvas(t)
 
     now = datetime.now()
 
@@ -1997,6 +2446,203 @@ def draw_screen_notifications(t, sysdata):
     return image
 
 
+def _status_dot(draw, x, y, ok):
+    color = WHITE if ok else cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333"))
+    draw.ellipse((x, y, x + 8, y + 8), fill=color)
+
+
+def draw_screen_uptime_kuma(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "UPTIME KUMA", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    cfg = CONFIG.get("uptime_kuma", {})
+    if not cfg.get("enabled"):
+        draw.text((16, 70), "Not configured", font=ip_font, fill=SECONDARY)
+    else:
+        mons = (_uptime_kuma or {}).get("monitors", [])
+        if not mons:
+            draw.text((16, 70), "No monitor data", font=ip_font, fill=SECONDARY)
+        for i, mon in enumerate(mons[:9]):
+            y = 54 + i * 22
+            _status_dot(draw, 16, y + 6, mon.get("status") == "up")
+            up = mon.get("uptime_pct")
+            suffix = f" {up:.1f}%" if isinstance(up, (int, float)) else ""
+            draw.text((30, y), f"{mon.get('name','?')[:24]}{suffix}", font=small_font, fill=WHITE if mon.get("status") == "up" else SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "uptime_kuma", "CLOCK & WEATHER NEXT")
+    return image
+
+
+def draw_screen_firewall(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "FIREWALL", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    cfg = CONFIG.get("firewall", {})
+    if not cfg.get("enabled"):
+        draw.text((16, 70), "Not configured", font=ip_font, fill=SECONDARY)
+    else:
+        fw = _firewall or {}
+        draw.text((16, 62), f"WAN: {'UP' if fw.get('wan_up') else 'DOWN'}", font=value_font, fill=WHITE if fw.get("wan_up") else cfgmod.hex_to_rgb(CONFIG.get("theme", {}).get("alert_color", "#FF3333")))
+        th = fw.get("throughput", {})
+        draw.text((16, 95), f"IF: {th.get('name', '--')}", font=small_font, fill=SECONDARY)
+        draw.text((16, 118), f"RX {th.get('rx_kbps', 0):.1f} KB/s", font=small_font, fill=WHITE)
+        draw.text((16, 140), f"TX {th.get('tx_kbps', 0):.1f} KB/s", font=small_font, fill=WHITE)
+        bc = fw.get("block_count")
+        draw.text((16, 175), f"Recent blocks: {bc if bc is not None else '--'}", font=small_font, fill=SECONDARY)
+        if fw.get("error"):
+            draw.text((16, 205), f"Err: {str(fw.get('error'))[:48]}", font=small_font, fill=SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "firewall", "CLOCK & WEATHER NEXT")
+    return image
+
+
+def draw_screen_pihole(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "PI-HOLE DNS", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    cfg = CONFIG.get("pihole", {})
+    if not cfg.get("enabled"):
+        draw.text((16, 70), "Not configured", font=ip_font, fill=SECONDARY)
+    else:
+        ph = _pihole or {}
+        if not ph.get("available"):
+            draw.text((16, 70), f"Unavailable: {str(ph.get('error',''))[:42]}", font=small_font, fill=SECONDARY)
+        else:
+            draw.text((16, 62), f"Status: {str(ph.get('status','--')).upper()}", font=value_font, fill=WHITE)
+            draw.text((16, 95), f"Queries today: {ph.get('queries_today', 0)}", font=small_font, fill=WHITE)
+            draw.text((16, 118), f"Blocked: {ph.get('ads_percentage_today', 0):.1f}% ({ph.get('ads_blocked_today', 0)})", font=small_font, fill=WHITE)
+            top_domain = next(iter((ph.get("top_blocked") or {}).items()), ("--", 0))
+            top_client = next(iter((ph.get("top_clients") or {}).items()), ("--", 0))
+            draw.text((16, 150), f"Top blocked: {top_domain[0][:24]}", font=small_font, fill=SECONDARY)
+            draw.text((16, 172), f"Top client: {top_client[0][:24]}", font=small_font, fill=SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "pihole", "CLOCK & WEATHER NEXT")
+    return image
+
+
+def draw_screen_countdowns(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "COUNTDOWNS", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    items = CONFIG.get("countdowns", [])
+    if not items:
+        draw.text((16, 70), "No countdowns configured", font=ip_font, fill=SECONDARY)
+    else:
+        for i, item in enumerate(items[:6]):
+            y = 54 + i * 32
+            try:
+                target = datetime.fromisoformat(str(item.get("target_date"))).date()
+                delta = target - date.today()
+                if delta.days > 0:
+                    text = f"{delta.days}d left"
+                elif delta.days == 0:
+                    text = "Today!"
+                else:
+                    text = f"{abs(delta.days)}d ago"
+            except Exception:
+                text = "Invalid date"
+            icon = item.get("icon") or "•"
+            draw.text((16, y), f"{icon} {item.get('label','')[:20]}", font=small_font, fill=WHITE)
+            draw.text((280, y), text, font=small_font, fill=SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "countdowns", "CLOCK & WEATHER NEXT")
+    return image
+
+
+def draw_screen_habits(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "HABITS", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    habits = get_habits_view()
+    if not habits:
+        draw.text((16, 70), "No habits configured", font=ip_font, fill=SECONDARY)
+    else:
+        for i, h in enumerate(habits[:8]):
+            y = 52 + i * 24
+            marker = "■" if h.get("today_done") else "□"
+            icon = h.get("icon") or "•"
+            draw.text((16, y), f"{marker} {icon} {h.get('label','')[:18]}", font=small_font, fill=WHITE)
+            draw.text((300, y), f"streak {h.get('streak',0)}", font=small_font, fill=SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "habits", "CLOCK & WEATHER NEXT")
+    return image
+
+
+def draw_screen_quote(t, sysdata):
+    image, draw = _new_screen_canvas(t)
+    draw.text((16, 14), "QUOTE", font=title_font, fill=WHITE)
+    draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+    if not CONFIG.get("quotes", {}).get("enabled"):
+        draw.text((16, 70), "Quotes disabled", font=ip_font, fill=SECONDARY)
+    else:
+        q = _pick_quote()
+        words = str(q.get("text", "")).split()
+        lines = []
+        line = ""
+        for w in words:
+            cand = (line + " " + w).strip()
+            if draw.textbbox((0, 0), cand, font=small_font)[2] <= W - 32:
+                line = cand
+            else:
+                lines.append(line)
+                line = w
+        if line:
+            lines.append(line)
+        for i, ln in enumerate(lines[:8]):
+            draw.text((16, 56 + i * 22), ln, font=small_font, fill=WHITE)
+        draw.text((16, 235), f"- {q.get('author','Unknown')[:40]}", font=small_font, fill=SECONDARY)
+    draw.line((12, 252, W - 12, 252), fill=WHITE, width=1)
+    _draw_footer(draw, "quote", "CLOCK & WEATHER NEXT")
+    return image
+
+
+_slideshow_idx = 0
+_slideshow_last_switch = 0.0
+
+
+def draw_screen_slideshow(t, sysdata):
+    global _slideshow_idx, _slideshow_last_switch
+    image, draw = _new_screen_canvas(t)
+    cfg = CONFIG.get("slideshow", {})
+    folder, names = list_slideshow_images()
+    if not cfg.get("enabled"):
+        draw.text((16, 14), "SLIDESHOW", font=title_font, fill=WHITE)
+        draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+        draw.text((16, 70), "Slideshow disabled", font=ip_font, fill=SECONDARY)
+    elif not names:
+        draw.text((16, 14), "SLIDESHOW", font=title_font, fill=WHITE)
+        draw.line((12, 40, W - 12, 40), fill=WHITE, width=1)
+        draw.text((16, 70), "No images found", font=ip_font, fill=SECONDARY)
+        draw.text((16, 92), folder[:58], font=small_font, fill=SECONDARY)
+    else:
+        interval = int(cfg.get("interval_s", 8))
+        if t - _slideshow_last_switch >= interval:
+            _slideshow_idx = (_slideshow_idx + 1) % len(names)
+            _slideshow_last_switch = t
+        path = os.path.join(folder, names[_slideshow_idx % len(names)])
+        try:
+            src = Image.open(path).convert("RGB")
+            if cfg.get("fit_mode") == "contain":
+                src.thumbnail((W, H))
+                x = (W - src.width) // 2
+                y = (H - src.height) // 2
+                image.paste(src, (x, y))
+            else:
+                ratio = max(W / src.width, H / src.height)
+                nw, nh = int(src.width * ratio), int(src.height * ratio)
+                src = src.resize((nw, nh))
+                x = (nw - W) // 2
+                y = (nh - H) // 2
+                image = src.crop((x, y, x + W, y + H))
+                draw = ImageDraw.Draw(image)
+            draw.rectangle((0, H - 24, W, H), fill=(0, 0, 0))
+            draw.text((8, H - 20), names[_slideshow_idx][:54], font=small_font, fill=SECONDARY)
+        except Exception:
+            draw.text((16, 70), "Failed to load image", font=ip_font, fill=SECONDARY)
+    _draw_footer(draw, "slideshow", "CLOCK & WEATHER NEXT")
+    return image
+
+
 SCREEN_RENDERER_MAP = {
     "clock":         draw_screen_clock,
     "system":        draw_screen_system,
@@ -2006,6 +2652,13 @@ SCREEN_RENDERER_MAP = {
     "ping":          draw_screen_ping,
     "alerts":        draw_screen_alerts,
     "notifications": draw_screen_notifications,
+    "uptime_kuma":   draw_screen_uptime_kuma,
+    "firewall":      draw_screen_firewall,
+    "pihole":        draw_screen_pihole,
+    "countdowns":    draw_screen_countdowns,
+    "habits":        draw_screen_habits,
+    "quote":         draw_screen_quote,
+    "slideshow":     draw_screen_slideshow,
 }
 
 apply_config(CONFIG)
@@ -2070,11 +2723,16 @@ def main():
                 update_weather()
                 update_location()
                 update_ping_samples()
+                update_integrations()
+                update_port_scan()
+                update_arp_watch()
                 sysdata = collect_sysdata()
                 last_sysdata_refresh = now
 
                 # pick up any changes saved from the web config UI
                 reload_config_if_changed()
+                _rebuild_screen_renderers_for_schedule()
+                _maybe_apply_night_brightness()
                 current_screen %= NUM_SCREENS
 
             elapsed = now - screen_start

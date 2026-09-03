@@ -22,8 +22,46 @@ Custom Display Pages for Raspberry Pi 5 with MHS 3.5" Touchscreen
 | `ping`          | Latency sparklines per configured host |
 | `alerts`        | Aggregated alerts (offline devices, thresholds, backup failures, ping timeouts) |
 | `notifications` | Notification inbox (requires a companion app to populate) |
+| `uptime_kuma`   | Uptime Kuma monitor list |
+| `firewall`      | pfSense/OPNsense WAN + throughput summary |
+| `pihole`        | Pi-hole query/block stats |
+| `countdowns`    | Event countdown list |
+| `habits`        | Habit streak overview |
+| `quote`         | Quote/motivation of the day |
+| `slideshow`     | Local image slideshow from `photos/` |
 
 All screens can be enabled/disabled and reordered from the web config UI.
+
+## New integrations and options
+
+- **Uptime Kuma**: uses the status-page JSON endpoint `GET {url}/api/status-page/{slug}` (configured via `uptime_kuma.enabled/url/slug`; `api_key` optional).
+- **Port scan reminder**: `port_scan.enabled/interval_hours/target` performs lightweight socket checks on common ports and alerts on newly-opened ports (`port_baseline.json` baseline).
+- **ARP watch**: `arp_watch.enabled/interface` polls `/proc/net/arp` and raises alerts for new LAN MAC addresses (`arp_baseline.json` baseline). Acknowledge devices with `POST /api/arp/allowlist`.
+- **Firewall**: `firewall.enabled/platform/host/api_key/api_secret/verify_ssl` supports OPNsense (`/api/core/system/status`) and pfSense REST plugin style status probing.
+- **Pi-hole**: `pihole.enabled/url/api_token` uses classic token API (`/admin/api.php?summaryRaw&auth=...`).
+- **Scheduling + night mode**: `scheduling.enabled/rules` restricts rotating screens by time/day; `scheduling.night_mode` can auto-dim brightness.
+- **Remote screenshot**: `GET /api/screenshot` serves `/tmp/mhs_last_frame.png` (updated about once per second from renderer).
+- **Weather extras**: `weather.show_aqi`, `weather.show_moon_phase`, `weather.show_sun_times`.
+- **Quotes**: local bundled `quotes.json` (100 entries) with `quotes.enabled/rotate_daily`.
+- **Profiles**: save/load full config snapshots in `profiles/*.json` via `/api/profiles`.
+- **Slideshow**: `slideshow.enabled/folder/interval_s/fit_mode`; drop images into `photos/` (or configured folder). List via `GET /api/slideshow/images`.
+- **Matrix effect**: `theme.background_effect` (`none` or `matrix_rain`).
+
+### New API endpoints
+
+- `GET /api/uptime-kuma`
+- `GET /api/firewall`
+- `GET /api/pihole`
+- `GET /api/arp/devices`
+- `POST /api/arp/allowlist` (`{"mac":"aa:bb:cc:dd:ee:ff"}`)
+- `GET /api/habits`
+- `POST /api/habits/{id}/toggle`
+- `GET /api/profiles`
+- `POST /api/profiles/{name}`
+- `POST /api/profiles/{name}/apply`
+- `DELETE /api/profiles/{name}`
+- `GET /api/slideshow/images`
+- `GET /api/screenshot`
 
 ## Installing dependencies
 
