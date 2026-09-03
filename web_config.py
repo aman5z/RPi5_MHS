@@ -24,12 +24,16 @@ import hmac
 import dashboard_config as cfgmod
 import tailscale_status
 import proxmox_status
+import uptime_kuma_status
+import firewall_status
+import pihole_status
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 NOTIFICATIONS_FILE = os.path.join(BASE_DIR, "notifications.json")
 PROXMOX_LAYOUT_FILE = os.path.join(BASE_DIR, "proxmox_layout.json")
+LAST_FRAME_PNG = "/tmp/mhs_last_frame.png"
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
@@ -489,6 +493,143 @@ def clear_notifications():
     return jsonify({"ok": True})
 
 
+@app.route("/api/uptime-kuma", methods=["GET"])
+def get_uptime_kuma():
+    cfg = cfgmod.load_config().get("uptime_kuma", {})
+    payload = {"available": False, "error": "unavailable", "monitors": []}
+    if "_dash" in globals() and hasattr(_dash, "get_uptime_kuma_data"):
+        payload = _dash.get_uptime_kuma_data(force=True) or payload
+    else:
+        payload = uptime_kuma_status.get_status(cfg, force=True) or payload
+    return jsonify({
+        "available": bool(payload.get("available")),
+        "error": None if payload.get("available") else "unavailable",
+        "monitors": payload.get("monitors", []),
+    })
+
+
+@app.route("/api/firewall", methods=["GET"])
+def get_firewall():
+    cfg = cfgmod.load_config().get("firewall", {})
+    payload = {"available": False, "error": "unavailable", "wan_up": None, "throughput": {}, "block_count": None}
+    if "_dash" in globals() and hasattr(_dash, "get_firewall_data"):
+        payload = _dash.get_firewall_data(force=True) or payload
+    else:
+        payload = firewall_status.get_status(cfg, force=True) or payload
+    return jsonify({
+        "available": bool(payload.get("available")),
+        "error": None if payload.get("available") else "unavailable",
+        "wan_up": payload.get("wan_up"),
+        "throughput": payload.get("throughput", {}),
+        "block_count": payload.get("block_count"),
+    })
+
+
+@app.route("/api/pihole", methods=["GET"])
+def get_pihole():
+    cfg = cfgmod.load_config().get("pihole", {})
+    payload = {"available": False, "error": "unavailable"}
+    if "_dash" in globals() and hasattr(_dash, "get_pihole_data"):
+        payload = _dash.get_pihole_data(force=True) or payload
+    else:
+        payload = pihole_status.get_status(cfg, force=True) or payload
+    return jsonify({
+        "available": bool(payload.get("available")),
+        "error": None if payload.get("available") else "unavailable",
+        "queries_today": payload.get("queries_today", 0),
+        "ads_blocked_today": payload.get("ads_blocked_today", 0),
+        "ads_percentage_today": payload.get("ads_percentage_today", 0.0),
+        "status": payload.get("status", "unknown"),
+        "top_blocked": payload.get("top_blocked", {}),
+        "top_clients": payload.get("top_clients", {}),
+    })
+
+
+@app.route("/api/arp/devices", methods=["GET"])
+def get_arp_devices():
+    if "_dash" in globals() and hasattr(_dash, "get_arp_devices"):
+        return jsonify({"devices": _dash.get_arp_devices()})
+    return jsonify({"devices": {}})
+
+
+@app.route("/api/arp/allowlist", methods=["POST"])
+def arp_allowlist():
+    body = request.get_json(silent=True) or {}
+    mac = str(body.get("mac", "")).strip()
+    if not mac:
+        return jsonify({"error": "mac required"}), 400
+    ok = False
+    if "_dash" in globals() and hasattr(_dash, "allowlist_arp_device"):
+        ok = _dash.allowlist_arp_device(mac)
+    return jsonify({"ok": bool(ok)})
+
+
+@app.route("/api/habits", methods=["GET"])
+def habits_list():
+    if "_dash" in globals() and hasattr(_dash, "get_habits_view"):
+        return jsonify({"habits": _dash.get_habits_view()})
+    return jsonify({"habits": []})
+
+
+@app.route("/api/habits/<habit_id>/toggle", methods=["POST"])
+def habits_toggle(habit_id):
+    ok = False
+    if "_dash" in globals() and hasattr(_dash, "toggle_habit_today"):
+        ok = _dash.toggle_habit_today(habit_id)
+    return jsonify({"ok": bool(ok)})
+
+
+@app.route("/api/profiles", methods=["GET"])
+def profiles_list():
+    return jsonify({"profiles": cfgmod.list_profiles()})
+
+
+@app.route("/api/profiles/<name>", methods=["POST"])
+def profiles_save(name):
+    saved_name = cfgmod.save_profile(name, cfgmod.load_config())
+    return jsonify({"ok": True, "name": saved_name})
+
+
+@app.route("/api/profiles/<name>/apply", methods=["POST"])
+def profiles_apply(name):
+    cfg = cfgmod.load_profile(name)
+    cfgmod.save_config(cfg)
+    return jsonify(cfg)
+
+
+@app.route("/api/profiles/<name>", methods=["DELETE"])
+def profiles_delete(name):
+    try:
+        deleted = cfgmod.delete_profile(name)
+        return jsonify({"ok": True, "name": deleted})
+    except FileNotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
+
+
+@app.route("/api/slideshow/images", methods=["GET"])
+def slideshow_images():
+    if "_dash" in globals() and hasattr(_dash, "list_slideshow_images"):
+        folder, images = _dash.list_slideshow_images()
+        return jsonify({"folder": folder, "images": images})
+    return jsonify({"folder": "", "images": []})
+
+
+@app.route("/api/screenshot", methods=["GET"])
+def screenshot_png():
+    try:
+        with open(LAST_FRAME_PNG, "rb") as f:
+            data = f.read()
+    except (OSError, FileNotFoundError):
+        return Response(status=503)
+    return Response(
+        data,
+        mimetype="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
-

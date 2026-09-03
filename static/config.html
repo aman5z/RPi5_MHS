@@ -20,14 +20,34 @@
     <p class="hint">Live mirror of the exact 480×320 frame shown on the physical MHS display.</p>
     <div style="display:flex;justify-content:center;align-items:center;background:#000;border-radius:10px;padding:12px;overflow:hidden;">
       <img id="live-display"
-           src="/api/display/frame"
+           src="/api/screenshot"
            alt="Live MHS display"
            style="display:block;width:min(100%,720px);height:auto;image-rendering:auto;background:#000;border-radius:4px;">
+    </div>
+    <div class="field-row" style="justify-content:center;margin-top:8px;">
+      <button type="button" class="secondary" id="live-preview-refresh">Refresh preview</button>
     </div>
     <p id="live-display-status" class="hint" style="text-align:center;margin-bottom:0;">Connecting…</p>
   </section>
 
   <div id="status" class="status" hidden></div>
+
+  <section class="card">
+    <h2>Config Profiles</h2>
+    <div class="field-row">
+      <label>Profile
+        <select id="profiles-select"></select>
+      </label>
+      <label>New profile name
+        <input type="text" id="profiles-new-name" placeholder="work-mode">
+      </label>
+    </div>
+    <div class="field-row">
+      <button type="button" class="secondary" id="profiles-save-btn">Save as Profile</button>
+      <button type="button" class="secondary" id="profiles-apply-btn">Apply Profile</button>
+      <button type="button" class="secondary" id="profiles-delete-btn">Delete Profile</button>
+    </div>
+  </section>
 
   <!-- THEME -->
   <section class="card">
@@ -50,6 +70,12 @@
       </label>
       <label>Warning colour
         <input type="color" id="theme-warn_color">
+      </label>
+      <label>Background effect
+        <select id="theme-background_effect">
+          <option value="none">None</option>
+          <option value="matrix_rain">Matrix rain</option>
+        </select>
       </label>
     </div>
   </section>
@@ -173,6 +199,11 @@
         <input type="number" step="any" id="weather-longitude" placeholder="e.g. -0.1278">
       </label>
     </div>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="weather-show_aqi"> Show AQI</label>
+      <label class="checkbox-label"><input type="checkbox" id="weather-show_moon_phase"> Show moon phase</label>
+      <label class="checkbox-label"><input type="checkbox" id="weather-show_sun_times"> Show sunrise/sunset</label>
+    </div>
     <h3 style="margin-top:12px">Clock screen location footer</h3>
     <p class="hint">The location shown is IP-based geolocation, not a physical GPS module, unless you have real GPS hardware.</p>
     <div class="field-row">
@@ -265,6 +296,114 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2>Uptime Kuma</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="uptime_kuma-enabled"> Enable</label>
+      <label>URL <input type="text" id="uptime_kuma-url" placeholder="https://kuma.local"></label>
+      <label>Status page slug <input type="text" id="uptime_kuma-slug" placeholder="public-status"></label>
+      <label>API Key (optional) <input type="password" id="uptime_kuma-api_key"></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Port Scan Reminder</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="port_scan-enabled"> Enable</label>
+      <label>Interval (hours) <input type="number" min="1" max="720" id="port_scan-interval_hours"></label>
+      <label>Target <input type="text" id="port_scan-target" placeholder="localhost"></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>ARP Watch</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="arp_watch-enabled"> Enable</label>
+      <label>Interface <input type="text" id="arp_watch-interface" placeholder="auto"></label>
+    </div>
+    <ul id="arp-device-list" class="screen-list"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Firewall (pfSense/OPNsense)</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="firewall-enabled"> Enable</label>
+      <label>Platform
+        <select id="firewall-platform">
+          <option value="opnsense">OPNsense</option>
+          <option value="pfsense">pfSense</option>
+        </select>
+      </label>
+      <label>Host <input type="text" id="firewall-host" placeholder="https://firewall.local"></label>
+    </div>
+    <div class="field-row">
+      <label>API Key <input type="text" id="firewall-api_key"></label>
+      <label>API Secret <input type="password" id="firewall-api_secret"></label>
+      <label class="checkbox-label"><input type="checkbox" id="firewall-verify_ssl"> Verify SSL</label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Pi-hole</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="pihole-enabled"> Enable</label>
+      <label>URL <input type="text" id="pihole-url" placeholder="http://pi.hole"></label>
+      <label>API Token <input type="password" id="pihole-api_token"></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Screen Scheduling</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="scheduling-enabled"> Enable scheduling</label>
+    </div>
+    <ul id="schedule-rule-list" class="screen-list"></ul>
+    <div class="field-row"><button type="button" class="secondary" id="schedule-add-btn">+ Add Rule</button></div>
+    <h3>Night Mode</h3>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="night_mode-enabled"> Enable night mode</label>
+      <label>Start <input type="time" id="night_mode-start_time"></label>
+      <label>End <input type="time" id="night_mode-end_time"></label>
+      <label>Brightness <input type="range" min="0" max="100" id="night_mode-dim_brightness"></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Countdowns</h2>
+    <ul id="countdown-list" class="screen-list"></ul>
+    <div class="field-row"><button type="button" class="secondary" id="countdown-add-btn">+ Add Countdown</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Habits</h2>
+    <ul id="habit-list" class="screen-list"></ul>
+    <div class="field-row"><button type="button" class="secondary" id="habit-add-btn">+ Add Habit</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Quotes</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="quotes-enabled"> Enable quote screen</label>
+      <label class="checkbox-label"><input type="checkbox" id="quotes-rotate_daily"> Rotate daily</label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Slideshow</h2>
+    <div class="field-row">
+      <label class="checkbox-label"><input type="checkbox" id="slideshow-enabled"> Enable</label>
+      <label>Folder <input type="text" id="slideshow-folder" placeholder="photos"></label>
+      <label>Interval (s) <input type="number" min="1" max="3600" id="slideshow-interval_s"></label>
+      <label>Fit mode
+        <select id="slideshow-fit_mode">
+          <option value="cover">Cover</option>
+          <option value="contain">Contain</option>
+        </select>
+      </label>
+    </div>
+    <p id="slideshow-images-hint" class="hint"></p>
+  </section>
+
   <div class="actions">
     <button id="save-btn" class="primary">Save &amp; Apply</button>
     <button id="reset-btn" class="secondary">Reset to Defaults</button>
@@ -276,6 +415,7 @@
 (() => {
   const img = document.getElementById("live-display");
   const status = document.getElementById("live-display-status");
+  const refreshBtn = document.getElementById("live-preview-refresh");
 
   if (!img) return;
 
@@ -292,11 +432,12 @@
       status.textContent = "Waiting for dashboard frame…";
     };
 
-    next.src = "/api/display/frame?t=" + Date.now();
+    next.src = "/api/screenshot?t=" + Date.now();
   }
 
   refreshFrame();
-  setInterval(refreshFrame, 250);
+  setInterval(refreshFrame, 3000);
+  if (refreshBtn) refreshBtn.addEventListener("click", refreshFrame);
 })();
 </script>
 
