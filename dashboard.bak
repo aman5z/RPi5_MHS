@@ -279,12 +279,12 @@ def _get_proxmox_layout():
         "items": {
             "title": {"x": 16, "y": 14},
             "clock": {"x": 464, "y": 14},
-            "cpu": {"x": 60, "y": 52},
-            "temp": {"x": 180, "y": 52},
-            "ram": {"x": 300, "y": 52},
-            "disk": {"x": 420, "y": 52},
-            "uptime": {"x": 25, "y": 168},
-            "tailscale": {"x": 258, "y": 168}
+            "cpu": {"x": 60, "y": 55},
+            "temp": {"x": 180, "y": 55},
+            "ram": {"x": 300, "y": 55},
+            "disk": {"x": 420, "y": 55},
+            "uptime": {"x": 25, "y": 170},
+            "tailscale": {"x": 258, "y": 170}
         }
     }
 
@@ -1094,11 +1094,11 @@ def icon_cpu(draw, x, y, t, load_pct=0):
     # pins
     for p in [12, 20, 28]:
 
-        draw.line((x+p, y+4, x+p, y+8), fill=WHITE, width=2)
-        draw.line((x+p, y+32, x+p, y+36), fill=WHITE, width=2)
+        draw.line((x+p, y+2, x+p, y+8), fill=WHITE, width=2)
+        draw.line((x+p, y+32, x+p, y+38), fill=WHITE, width=2)
 
-        draw.line((x+4, y+p, x+8, y+p), fill=WHITE, width=2)
-        draw.line((x+32, y+p, x+36, y+p), fill=WHITE, width=2)
+        draw.line((x+2, y+p, x+8, y+p), fill=WHITE, width=2)
+        draw.line((x+32, y+p, x+38, y+p), fill=WHITE, width=2)
 
 def icon_thermometer(draw, x, y, fill_ratio=0.5):
     """fill_ratio 0..1 controls how full the animated mercury column is."""
@@ -1106,19 +1106,19 @@ def icon_thermometer(draw, x, y, fill_ratio=0.5):
     fill_ratio = max(0.0, min(1.0, fill_ratio))
 
     draw.line(
-        (x+20, y+4, x+20, y+26),
+        (x+20, y+5, x+20, y+27),
         fill=WHITE,
         width=4
     )
 
     draw.ellipse(
-        (x+12, y+20, x+28, y+36),
+        (x+12, y+21, x+28, y+37),
         outline=WHITE,
         width=2
     )
 
     # animated mercury: fills from the bulb upward
-    top = 26 - int(16 * fill_ratio)
+    top = 27 - int(17 * fill_ratio)
 
     draw.line(
         (x+20, y+top, x+20, y+27),
@@ -1127,7 +1127,7 @@ def icon_thermometer(draw, x, y, fill_ratio=0.5):
     )
 
     draw.ellipse(
-        (x+15, y+23, x+25, y+33),
+        (x+15, y+24, x+25, y+34),
         fill=WHITE
     )
 
@@ -1135,7 +1135,7 @@ def icon_thermometer(draw, x, y, fill_ratio=0.5):
 def icon_ram(draw, x, y, t):
 
     draw.rectangle(
-        (x+3, y+4, x+37, y+24),
+        (x+3, y+12, x+37, y+29),
         outline=WHITE,
         width=2
     )
@@ -1143,7 +1143,7 @@ def icon_ram(draw, x, y, t):
     for p in range(8, 37, 7):
 
         draw.line(
-            (x+p, y+24, x+p, y+30),
+            (x+p, y+29, x+p, y+35),
             fill=WHITE,
             width=2
         )
@@ -1156,12 +1156,12 @@ def icon_ram(draw, x, y, t):
 
         if i == active:
             draw.rectangle(
-                (x+p-1, y+8, x+p+4, y+18),
+                (x+p-1, y+16, x+p+4, y+24),
                 fill=WHITE
             )
         else:
             draw.rectangle(
-                (x+p, y+9, x+p+3, y+17),
+                (x+p, y+17, x+p+3, y+23),
                 fill=WHITE
             )
 
@@ -1192,7 +1192,7 @@ def icon_disk(draw, x, y, t):
     draw.ellipse((hx-1.5, hy-1.5, hx+1.5, hy+1.5), fill=WHITE)
 
     draw.line(
-        (x+10, y+28, x+30, y+28),
+        (x+10, y+29, x+30, y+29),
         fill=WHITE,
         width=2
     )
@@ -1205,20 +1205,20 @@ def icon_drop(draw, x, y, t):
 
     draw.polygon(
         [
-            (x+20, y+4+bob),
-            (x+8, y+22+bob),
-            (x+8, y+29+bob),
-            (x+12, y+36+bob),
-            (x+20, y+40+bob),
-            (x+28, y+36+bob),
-            (x+32, y+29+bob),
-            (x+32, y+22+bob)
+            (x+20, y+2+bob),
+            (x+8, y+20+bob),
+            (x+8, y+27+bob),
+            (x+12, y+34+bob),
+            (x+20, y+38+bob),
+            (x+28, y+34+bob),
+            (x+32, y+27+bob),
+            (x+32, y+20+bob)
         ],
         outline=WHITE
     )
 
     draw.arc(
-        (x+14, y+24+bob, x+25, y+34+bob),
+        (x+14, y+22+bob, x+25, y+32+bob),
         0,
         180,
         fill=WHITE,
@@ -1230,13 +1230,13 @@ def icon_weather(draw, x, y, t):
 
     # sun
     draw.ellipse(
-        (x+4, y+4, x+23, y+23),
+        (x+4, y+7, x+23, y+26),
         outline=WHITE,
         width=2
     )
 
     # rotating rays
-    cx, cy, r1, r2 = x+13.5, y+13.5, 10, 15
+    cx, cy, r1, r2 = x+13.5, y+16.5, 10, 15
     for i in range(8):
         angle = math.radians(i * 45 + t * 25)
         x1 = cx + r1 * math.cos(angle)
@@ -1264,19 +1264,19 @@ def icon_network(draw, x, y, t):
 
     # router
     draw.rounded_rectangle(
-        (x+2, y+22, x+38, y+33),
+        (x+2, y+23, x+38, y+34),
         radius=2,
         outline=WHITE,
         width=2
     )
 
     draw.ellipse(
-        (x+9, y+26, x+12, y+29),
+        (x+9, y+27, x+12, y+30),
         fill=WHITE
     )
 
     draw.ellipse(
-        (x+28, y+26, x+31, y+29),
+        (x+28, y+27, x+31, y+30),
         fill=WHITE
     )
 
@@ -1286,7 +1286,7 @@ def icon_network(draw, x, y, t):
     inner_on = 0.35 < cycle
 
     draw.arc(
-        (x+10, y+4, x+30, y+24),
+        (x+10, y+5, x+30, y+25),
         210,
         330,
         fill=WHITE,
@@ -1294,7 +1294,7 @@ def icon_network(draw, x, y, t):
     )
 
     draw.arc(
-        (x+14, y+9, x+26, y+21),
+        (x+14, y+10, x+26, y+22),
         210,
         330,
         fill=WHITE,
@@ -1302,7 +1302,7 @@ def icon_network(draw, x, y, t):
     )
 
     draw.ellipse(
-        (x+19, y+17, x+21, y+19),
+        (x+19, y+18, x+21, y+20),
         fill=WHITE
     )
 
@@ -1345,10 +1345,10 @@ def icon_fan(draw, x, y, t, rpm=0):
 def icon_location(draw, x, y, t):
     """Animated GPS/location pin: the outer ring pulses outward."""
 
-    cx, cy = x + 20, y + 18
+    cx, cy = x + 20, y + 16
 
     # pulsing outer ring
-    pulse_r = 10 + int(3 * math.sin(t * 3))
+    pulse_r = 12 + int(3 * math.sin(t * 3))
     draw.ellipse(
         (cx - pulse_r, cy - pulse_r, cx + pulse_r, cy + pulse_r),
         outline=WHITE,
@@ -1372,16 +1372,16 @@ def icon_alert(draw, x, y, t):
     cx = x + 20
 
     draw.polygon(
-        [(cx, y + 4), (x + 5, y + 34), (x + 35, y + 34)],
+        [(cx, y + 5), (x + 5, y + 35), (x + 35, y + 35)],
         outline=WHITE,
         width=2,
     )
     # exclamation mark
-    draw.rectangle((cx - 1, y + 13, cx + 1, y + 26), fill=WHITE)
+    draw.rectangle((cx - 1, y + 14, cx + 1, y + 27), fill=WHITE)
     if pulse:
-        draw.ellipse((cx - 2, y + 29, cx + 2, y + 33), fill=WHITE)
+        draw.ellipse((cx - 2, y + 30, cx + 2, y + 34), fill=WHITE)
     else:
-        draw.ellipse((cx - 2, y + 29, cx + 2, y + 33), outline=WHITE, width=1)
+        draw.ellipse((cx - 2, y + 30, cx + 2, y + 34), outline=WHITE, width=1)
 
 
 # ---------------------------------------------------------
@@ -1556,22 +1556,22 @@ def draw_screen_system(t, sysdata):
     # =====================================================
 
     icon_cpu(draw, 34, 55, at, cpu)
-    draw.text((37, 93), "CPU", font=small_font, fill=SECONDARY)
-    draw.text((43, 111), f"{cpu:.0f}%", font=value_font, fill=WHITE)
+    draw.text((37, 89), "CPU", font=small_font, fill=SECONDARY)
+    draw.text((43, 106), f"{cpu:.0f}%", font=value_font, fill=WHITE)
 
     global displayed_temp
     displayed_temp += (temp - displayed_temp) * 0.15
     icon_thermometer(draw, 155, 55, displayed_temp / 100)
-    draw.text((145, 93), "TEMP", font=small_font, fill=SECONDARY)
-    draw.text((132, 111), f"{temp:.1f}°C", font=value_font, fill=WHITE)
+    draw.text((145, 89), "TEMP", font=small_font, fill=SECONDARY)
+    draw.text((132, 106), f"{temp:.1f}°C", font=value_font, fill=WHITE)
 
     icon_ram(draw, 276, 55, at)
-    draw.text((282, 93), "RAM", font=small_font, fill=SECONDARY)
-    draw.text((264, 111), f"{ram_used:.1f}/{ram_total:.0f}GB", font=value_font, fill=WHITE)
+    draw.text((282, 89), "RAM", font=small_font, fill=SECONDARY)
+    draw.text((264, 106), f"{ram_used:.1f}/{ram_total:.0f}GB", font=value_font, fill=WHITE)
 
     icon_disk(draw, 397, 55, at)
-    draw.text((401, 93), "DISK", font=small_font, fill=SECONDARY)
-    draw.text((389, 111), f"{disk_used:.0f}/{disk_total:.0f}GB", font=value_font, fill=WHITE)
+    draw.text((401, 89), "DISK", font=small_font, fill=SECONDARY)
+    draw.text((389, 106), f"{disk_used:.0f}/{disk_total:.0f}GB", font=value_font, fill=WHITE)
 
     # dividers
     draw.line((120, 53, 120, 160), fill=WHITE)
@@ -1582,35 +1582,35 @@ def draw_screen_system(t, sysdata):
     # PROGRESS BARS
     # =====================================================
 
-    draw.rectangle((20, 141, 105, 148), outline=WHITE)
-    draw.rectangle((22, 143, 22 + int(81 * cpu / 100), 146), fill=WHITE)
+    draw.rectangle((20, 137, 105, 144), outline=WHITE)
+    draw.rectangle((22, 139, 22 + int(81 * cpu / 100), 142), fill=WHITE)
 
     temp_pct = min(max((temp / 100), 0), 1)
-    draw.rectangle((138, 141, 223, 148), outline=WHITE)
-    draw.rectangle((140, 143, 140 + int(81 * temp_pct), 146), fill=WHITE)
+    draw.rectangle((138, 137, 223, 144), outline=WHITE)
+    draw.rectangle((140, 139, 140 + int(81 * temp_pct), 142), fill=WHITE)
 
     ram_pct = ram_used / ram_total if ram_total else 0
-    draw.rectangle((258, 141, 343, 148), outline=WHITE)
-    draw.rectangle((260, 143, 260 + int(81 * ram_pct), 146), fill=WHITE)
+    draw.rectangle((258, 137, 343, 144), outline=WHITE)
+    draw.rectangle((260, 139, 260 + int(81 * ram_pct), 142), fill=WHITE)
 
     disk_pct = disk_used / disk_total if disk_total else 0
-    draw.rectangle((378, 141, 463, 148), outline=WHITE)
-    draw.rectangle((380, 143, 380 + int(81 * disk_pct), 146), fill=WHITE)
+    draw.rectangle((378, 137, 463, 144), outline=WHITE)
+    draw.rectangle((380, 139, 380 + int(81 * disk_pct), 142), fill=WHITE)
 
-    draw.line((12, 164, W-12, 164), fill=WHITE, width=1)
+    draw.line((12, 160, W-12, 160), fill=WHITE, width=1)
 
     # =====================================================
     # FAN | LAN IP row
     # =====================================================
 
-    icon_fan(draw, 25, 168, at, sysdata["fan_rpm"])
+    icon_fan(draw, 25, 170, at, sysdata["fan_rpm"])
     draw.text((68, 172), "FAN SPEED", font=small_font, fill=SECONDARY)
     fan_txt = f"{sysdata['fan_rpm']} RPM" if sysdata["fan_rpm"] else "STOPPED"
     draw.text((68, 189), fan_txt, font=value_font, fill=WHITE)
 
     draw.line((240, 167, 240, 212), fill=WHITE, width=1)
 
-    icon_network(draw, 258, 168, at)
+    icon_network(draw, 258, 170, at)
     draw.text((304, 172), "LAN IP", font=small_font, fill=SECONDARY)
     draw.text((304, 189), ip, font=ip_font, fill=WHITE)
 
@@ -2056,7 +2056,7 @@ def draw_screen_devices(t, sysdata):
         _center_text(
             draw,
             cx,
-            icon_y + 38,
+            icon_y + 34,
             data["label"],
             small_font,
             SECONDARY,
@@ -2066,7 +2066,7 @@ def draw_screen_devices(t, sysdata):
         _center_text(
             draw,
             cx,
-            icon_y + 55,
+            icon_y + 51,
             data["value"],
             value_font,
             WHITE,
@@ -2076,7 +2076,7 @@ def draw_screen_devices(t, sysdata):
         # Progress bar, always centered under the group.
         bar_w = 86
         bar_x = int(cx - bar_w / 2)
-        bar_y = int(icon_y + 86)
+        bar_y = int(icon_y + 82)
 
         pct = max(0.0, min(1.0, float(data["pct"])))
 
@@ -2128,7 +2128,7 @@ def draw_screen_devices(t, sysdata):
     icon_fan(draw, ux, uy, at, 0)
 
     draw.text(
-        (ux + 43, uy + 4),
+        (ux + 43, uy + 2),
         "UPTIME",
         font=small_font,
         fill=SECONDARY
@@ -2153,7 +2153,7 @@ def draw_screen_devices(t, sysdata):
     icon_network(draw, tx, ty, at)
 
     draw.text(
-        (tx + 46, ty + 4),
+        (tx + 46, ty + 2),
         "TAILSCALE",
         font=small_font,
         fill=SECONDARY
