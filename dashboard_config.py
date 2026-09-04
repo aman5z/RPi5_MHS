@@ -593,6 +593,12 @@ def _is_hex_color(value):
     if not value.startswith("#") or len(value) not in (4, 7):
         return False
 
+    try:
+        int(value[1:], 16)
+        return True
+    except ValueError:
+        return False
+
 
 def _sanitize_hhmm(value, default):
     value = str(value or "").strip()
@@ -607,12 +613,6 @@ def _sanitize_hhmm(value, default):
     except ValueError:
         pass
     return default
-
-    try:
-        int(value[1:], 16)
-        return True
-    except ValueError:
-        return False
 
 
 def load_config(path=CONFIG_PATH):
