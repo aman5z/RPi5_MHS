@@ -1,6 +1,14 @@
 # RPi5_MHS
 Custom Display Pages for Raspberry Pi 5 with MHS 3.5" Touchscreen
 
+![20260824_095102](https://github.com/user-attachments/assets/c44b9535-0b8d-4e79-b953-4f1a2d221db9)
+![20260824_095110](https://github.com/user-attachments/assets/a72de3f8-1cbd-4b20-96ad-ae36d0c43690)
+![20260824_095055](https://github.com/user-attachments/assets/22cf25ba-1932-4569-bad6-340270a93c9d)
+![20260824_095115](https://github.com/user-attachments/assets/a68ced64-94f7-4f84-950a-4d76cfa7738a)
+![20260824_095121](https://github.com/user-attachments/assets/fa705bcc-25e2-4619-bfd6-beb773cbffeb)
+![20260824_095048](https://github.com/user-attachments/assets/c5fbd9dc-a579-496d-9517-5cab24dab239)
+
+
 ## What's included
 
 - `dashboard.py` &mdash; renders all screens directly to the framebuffer (`/dev/fb0`).
